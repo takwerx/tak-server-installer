@@ -1,0 +1,49 @@
+# TAK Server packages (users download separately)
+*.rpm
+*.deb
+*.noarch.rpm
+*_all.deb
+
+# TAK Server verification files
+*.gpg
+*.key
+*.pol
+
+# Certificates and keys
+*.p12
+*.jks
+*.pem
+*.key
+*.crt
+*.csr
+
+# Logs
+*.log
+*.log.*
+
+# Backup files
+*.backup
+*.bak
+*~
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor files
+.vscode/
+.idea/
+*.sublime-*
+
+# Temporary files
+*.tmp
+*.temp
+/tmp/
+/temp/
+
+# Personal configuration
+config.local
+*.local
