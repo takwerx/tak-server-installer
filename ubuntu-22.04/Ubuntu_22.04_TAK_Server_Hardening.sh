@@ -37,6 +37,7 @@ if [ ! -d "/opt/tak" ]; then
 fi
 
 # Check for unattended-upgrades running
+echo "Checking for system upgrades in progress..."
 if pgrep -f "/usr/bin/unattended-upgrade$" > /dev/null; then
     echo ""
     echo "************************************************************"
@@ -57,6 +58,9 @@ if pgrep -f "/usr/bin/unattended-upgrade$" > /dev/null; then
     echo "✓ System updates complete! Starting hardening setup now..."
     echo ""
     sleep 2
+else
+    echo "✓ No system upgrades in progress, continuing..."
+    echo ""
 fi
 
 
