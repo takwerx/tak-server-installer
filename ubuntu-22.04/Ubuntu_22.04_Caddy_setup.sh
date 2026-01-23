@@ -18,7 +18,7 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 # Check for unattended-upgrades running
-if pgrep -x "unattended-upgr" > /dev/null; then
+if pgrep -f "/usr/bin/unattended-upgrade$" > /dev/null; then
     echo ""
     echo "************************************************************"
     echo "  YOUR OPERATING SYSTEM IS CURRENTLY DOING UPGRADES"
@@ -28,7 +28,7 @@ if pgrep -x "unattended-upgr" > /dev/null; then
     echo ""
     
     SECONDS=0
-    while pgrep -x "unattended-upgr" > /dev/null; do
+    while pgrep -f "/usr/bin/unattended-upgrade$" > /dev/null; do
         printf "\rWaiting... %02d:%02d elapsed" $((SECONDS/60)) $((SECONDS%60))
         sleep 2
     done
