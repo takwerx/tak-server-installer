@@ -332,12 +332,181 @@ echo "Step 17: Configure Email Sending"
 echo "=========================================="
 echo ""
 echo "Choose email sending method:"
-echo "  1) Direct sending (may be blocked by ISP/VPS provider)"
-echo "  2) Gmail SMTP relay (recommended - more reliable)"
+echo "  1) Custom SMTP relay (Mailgun, SendGrid, internal server, etc.)"
+echo "  2) Gmail SMTP relay (simplified setup)"
 echo ""
 read -p 'Select option (1-2): ' EMAIL_METHOD
 
-if [ "$EMAIL_METHOD" = "2" ]; then
+# Unified postfix configuration function
+configure_postfix_relay() {
+    local SMTP_HOST="$1"
+    local SMTP_PORT="$2"
+    local SMTP_USER="$3"
+    local SMTP_PASS="$4"
+    local FROM_ADDR="$5"
+    local ENCRYPTION_MODE="$6"   # STARTTLS | SMTPS | NONE
+    local TLS_VERIFY="$7"        # yes | no
+    local AUTH_REQUIRED="$8"     # yes | no
+
+    # Install postfix + mail utilities
+    apt install -y postfix mailutils
+
+    # SASL modules only needed if auth is used
+    if [ "$AUTH_REQUIRED" = "yes" ]; then
+        apt install -y libsasl2-modules
+    fi
+
+    # Relayhost
+    postconf -e "relayhost = [${SMTP_HOST}]:${SMTP_PORT}"
+
+    # TLS settings
+    case "$ENCRYPTION_MODE" in
+        STARTTLS)
+            postconf -e "smtp_use_tls = yes"
+            postconf -e "smtp_tls_wrappermode = no"
+            ;;
+        SMTPS)
+            # Implicit TLS (usually port 465)
+            postconf -e "smtp_use_tls = yes"
+            postconf -e "smtp_tls_wrappermode = yes"
+            ;;
+        NONE)
+            postconf -e "smtp_use_tls = no"
+            postconf -e "smtp_tls_wrappermode = no"
+            ;;
+        *)
+            echo "ERROR: Invalid encryption mode: $ENCRYPTION_MODE"
+            exit 1
+            ;;
+    esac
+
+    # TLS verification toggle (Postfix client-side)
+    # - "verify" requires a valid cert chain
+    # - "encrypt" encrypts but does NOT require cert verification
+    if [ "$ENCRYPTION_MODE" != "NONE" ]; then
+        if [ "$TLS_VERIFY" = "yes" ]; then
+            postconf -e "smtp_tls_security_level = verify"
+            postconf -e "smtp_tls_CAfile = /etc/ssl/certs/ca-certificates.crt"
+        else
+            postconf -e "smtp_tls_security_level = encrypt"
+        fi
+    else
+        postconf -e "smtp_tls_security_level = none"
+    fi
+
+    # SASL auth
+    if [ "$AUTH_REQUIRED" = "yes" ]; then
+        echo "[${SMTP_HOST}]:${SMTP_PORT} ${SMTP_USER}:${SMTP_PASS}" > /etc/postfix/sasl_passwd
+        chmod 600 /etc/postfix/sasl_passwd
+        postmap /etc/postfix/sasl_passwd
+
+        postconf -e "smtp_sasl_auth_enable = yes"
+        postconf -e "smtp_sasl_security_options = noanonymous"
+        postconf -e "smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd"
+    else
+        # Ensure auth isn't half-enabled from a previous run
+        postconf -e "smtp_sasl_auth_enable = no"
+    fi
+
+    # Friendly From: rewriting
+    postconf -e "smtp_generic_maps = hash:/etc/postfix/generic"
+    cat > /etc/postfix/generic << EOF
+root@$(hostname) TAK Guard Dog <${FROM_ADDR}>
+@$(hostname) TAK Guard Dog <${FROM_ADDR}>
+EOF
+    postmap /etc/postfix/generic
+
+    postconf -e "smtp_header_checks = regexp:/etc/postfix/header_checks"
+    cat > /etc/postfix/header_checks << EOFHEADER
+/^From:.*root@/ REPLACE From: TAK Guard Dog <${FROM_ADDR}>
+EOFHEADER
+
+    systemctl enable postfix
+    systemctl restart postfix
+
+    echo "✓ Postfix relay configured:"
+    echo "  Relay: ${SMTP_HOST}:${SMTP_PORT}"
+    echo "  Encryption: ${ENCRYPTION_MODE}"
+    echo "  TLS Verify: ${TLS_VERIFY}"
+    echo "  Auth: ${AUTH_REQUIRED}"
+    echo "  From: TAK Guard Dog <${FROM_ADDR}>"
+}
+
+if [ "$EMAIL_METHOD" = "1" ]; then
+    echo ""
+    echo "=========================================="
+    echo "Custom SMTP Relay Configuration"
+    echo "=========================================="
+    echo ""
+
+    read -p 'SMTP server hostname (e.g., smtp.mailgun.org): ' SMTP_HOST
+
+    while true; do
+        read -p 'SMTP port (e.g., 587 for STARTTLS, 465 for SMTPS): ' SMTP_PORT
+        if [[ "$SMTP_PORT" =~ ^[0-9]+$ ]] && [ "$SMTP_PORT" -ge 1 ] && [ "$SMTP_PORT" -le 65535 ]; then
+            break
+        else
+            echo "ERROR: Port must be a number from 1-65535"
+        fi
+    done
+
+    echo ""
+    echo "Encryption mode:"
+    echo "  1) STARTTLS (recommended; usually port 587)"
+    echo "  2) SMTPS (implicit TLS; usually port 465)"
+    echo "  3) NONE (not recommended)"
+    read -p 'Select option (1-3): ' ENC_CHOICE
+
+    case "$ENC_CHOICE" in
+        1) ENCRYPTION_MODE="STARTTLS" ;;
+        2) ENCRYPTION_MODE="SMTPS" ;;
+        3) ENCRYPTION_MODE="NONE" ;;
+        *) echo "Invalid choice"; exit 1 ;;
+    esac
+
+    read -p 'Require TLS certificate verification? (y/n): ' TLS_VERIFY_CHOICE
+    if [[ "$TLS_VERIFY_CHOICE" =~ ^[Yy]$ ]]; then
+        TLS_VERIFY="yes"
+    else
+        TLS_VERIFY="no"
+    fi
+
+    read -p 'Does this SMTP server require authentication? (y/n): ' AUTH_CHOICE
+    if [[ "$AUTH_CHOICE" =~ ^[Yy]$ ]]; then
+        AUTH_REQUIRED="yes"
+
+        read -p 'SMTP username: ' SMTP_USER
+        read -s -p 'SMTP password (input hidden): ' SMTP_PASS
+        echo ""
+    else
+        AUTH_REQUIRED="no"
+        SMTP_USER=""
+        SMTP_PASS=""
+    fi
+
+    echo ""
+    echo "From address:"
+    echo "  1) Use first alert email (${ALERT_EMAILS[0]})"
+    echo "  2) Enter a custom From address"
+    read -p 'Select option (1-2): ' FROM_CHOICE
+
+    if [ "$FROM_CHOICE" = "2" ]; then
+        while true; do
+            read -p 'From email address: ' FROM_ADDR
+            read -p 'Confirm From email address: ' FROM_ADDR_CONFIRM
+            if [ "$FROM_ADDR" = "$FROM_ADDR_CONFIRM" ]; then
+                break
+            else
+                echo "ERROR: From addresses do not match. Please try again."
+            fi
+        done
+    else
+        FROM_ADDR="${ALERT_EMAILS[0]}"
+    fi
+
+    configure_postfix_relay "$SMTP_HOST" "$SMTP_PORT" "$SMTP_USER" "$SMTP_PASS" "$FROM_ADDR" "$ENCRYPTION_MODE" "$TLS_VERIFY" "$AUTH_REQUIRED"
+
+elif [ "$EMAIL_METHOD" = "2" ]; then
     echo ""
     echo "=========================================="
     echo "Gmail SMTP Configuration"
@@ -356,12 +525,10 @@ if [ "$EMAIL_METHOD" = "2" ]; then
     echo ""
     read -p 'Press Enter when you have your Gmail app password ready...'
     echo ""
-    
-    # Gmail address with confirmation
+
     while true; do
         read -p 'Gmail address: ' GMAIL_ADDRESS
         read -p 'Confirm Gmail address: ' GMAIL_ADDRESS_CONFIRM
-        
         if [ "$GMAIL_ADDRESS" = "$GMAIL_ADDRESS_CONFIRM" ]; then
             break
         else
@@ -369,71 +536,19 @@ if [ "$EMAIL_METHOD" = "2" ]; then
             echo ""
         fi
     done
-    
-    # App password (visible - easier to verify the 16 characters)
+
     read -p 'Gmail app password (16 characters with spaces): ' GMAIL_APP_PASSWORD
-    
-    # Remove spaces from app password
     GMAIL_APP_PASSWORD=$(echo "$GMAIL_APP_PASSWORD" | tr -d ' ')
-    
-    echo ""
-    echo "Gmail SMTP configured:"
-    echo "  Address: $GMAIL_ADDRESS"
-    echo ""
-    
-    # Install postfix first (needed for configuration files)
-    apt install -y postfix
-    
-    # Install SASL for Gmail authentication
-    apt install -y libsasl2-modules
-    
-    # Configure Gmail credentials
-    echo "[smtp.gmail.com]:587 $GMAIL_ADDRESS:$GMAIL_APP_PASSWORD" > /etc/postfix/sasl_passwd
-    chmod 600 /etc/postfix/sasl_passwd
-    postmap /etc/postfix/sasl_passwd
-    
-    # Configure postfix to use Gmail
-    postconf -e "relayhost = [smtp.gmail.com]:587"
-    postconf -e "smtp_use_tls = yes"
-    postconf -e "smtp_sasl_auth_enable = yes"
-    postconf -e "smtp_sasl_security_options = noanonymous"
-    postconf -e "smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd"
-    postconf -e "smtp_tls_CAfile = /etc/ssl/certs/ca-certificates.crt"
-    postconf -e "smtp_tls_security_level = encrypt"
-    
-    # Configure friendly sender name
-    postconf -e "smtp_generic_maps = hash:/etc/postfix/generic"
-    
-    cat > /etc/postfix/generic << EOF
-root@$(hostname) TAK Guard Dog <$GMAIL_ADDRESS>
-@$(hostname) TAK Guard Dog <$GMAIL_ADDRESS>
-EOF
-    
-    postmap /etc/postfix/generic
-    
-    # Force sender rewrite with header checks (Gmail sometimes ignores generic maps)
-    postconf -e "smtp_header_checks = regexp:/etc/postfix/header_checks"
-    
-    cat > /etc/postfix/header_checks << EOFHEADER
-/^From:.*root@/ REPLACE From: TAK Guard Dog <$GMAIL_ADDRESS>
-EOFHEADER
-    
-    echo ""
-    echo "✓ Gmail SMTP relay configured"
-    echo "  Sending via: smtp.gmail.com:587"
-    echo "  From: TAK Guard Dog <$GMAIL_ADDRESS>"
+
+    # Call unified function with Gmail defaults
+    configure_postfix_relay "smtp.gmail.com" "587" "$GMAIL_ADDRESS" "$GMAIL_APP_PASSWORD" "$GMAIL_ADDRESS" "STARTTLS" "yes" "yes"
+
 else
-    echo ""
-    echo "✓ Using direct email sending"
-    echo "  Note: Some ISPs/VPS providers block port 25"
-    echo "  If emails don't arrive, re-run and choose Gmail relay"
+    echo "Invalid option selected"
+    exit 1
 fi
 
-# Install s-nail (mailx replacement) and postfix for Rocky 9
-apt install -y mailutils postfix
-systemctl enable postfix
-systemctl start postfix
-
+echo ""
 echo "✓ Mail utilities installed"
 
 echo ""
