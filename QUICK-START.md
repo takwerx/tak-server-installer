@@ -181,7 +181,9 @@ sudo ./Rocky_9_TAK_Server_Hardening.sh
 - SSH port change (optional, recommended)
 - Email address(es) for alerts
 - SMS alerts (optional, carrier-dependent)
-- Email configuration (direct or Gmail SMTP)
+- **Email configuration:**
+  - **Option 1:** Custom SMTP relay (Mailgun, SendGrid, internal server, etc.)
+  - **Option 2:** Gmail SMTP relay (simplified setup)
 - Test alerts
 
 **Features added:**

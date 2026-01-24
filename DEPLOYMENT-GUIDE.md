@@ -479,22 +479,32 @@ Note: AT&T shut down email-to-SMS gateways in June 2025.
       Other carriers may be unreliable.
 
 STEP 4: Email Configuration
-- Option 1: Direct sending (may be blocked by ISP/VPS)
-- Option 2: Gmail SMTP relay (recommended)
+- **Option 1: Custom SMTP relay** (Mailgun, SendGrid, internal server, etc.)
+  - SMTP server hostname
+  - SMTP port (587 for STARTTLS, 465 for SMTPS)
+  - Encryption mode (STARTTLS, SMTPS, or NONE)
+  - TLS certificate verification (yes/no)
+  - Authentication (optional - username/password)
+  - From address (can use first alert email or custom)
+- **Option 2: Gmail SMTP relay** (simplified setup)
+  - Gmail address for sending alerts
+  - Gmail App Password (16 characters)
 
-If using Gmail SMTP:
-- Gmail address for sending alerts
-- Gmail App Password (16 characters)
-
-How to get Gmail App Password:
+**How to get Gmail App Password:**
 1. Go to: https://myaccount.google.com/apppasswords
 2. Sign in to your Google account
 3. Create an app password for 'Mail'
 4. Copy the 16-character password
 
+**Custom SMTP Relay Benefits:**
+- Works with any SMTP service (Mailgun, SendGrid, AWS SES, etc.)
+- Supports internal mail servers
+- Full control over encryption and authentication
+- Professional sending from your own domain
+
 STEP 5: Test Alerts
 - Script will send test email and SMS
-- Wait 60 seconds for delivery
+- Wait 30 seconds for delivery
 - Confirm receipt
 
 ⚠️ IMPORTANT: SMS alerts via email-to-SMS gateways are unreliable!
