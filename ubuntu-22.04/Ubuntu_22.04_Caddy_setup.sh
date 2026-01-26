@@ -73,9 +73,9 @@ echo "=========================================="
 
 # Prompt for domain with confirmation
 while true; do
-    read -p 'Enter your domain name for TAK Server (e.g., tak.yourdomain.com): ' TAK_DOMAIN
-    read -p 'Confirm domain name: ' TAK_DOMAIN_CONFIRM
-    
+    read -p 'Enter your primary domain name for TAK Server (e.g., tak.yourdomain.com): ' TAK_DOMAIN
+    read -p 'Confirm primary domain name: ' TAK_DOMAIN_CONFIRM
+
     if [ "$TAK_DOMAIN" = "$TAK_DOMAIN_CONFIRM" ]; then
         break
     else
@@ -88,6 +88,21 @@ if [ -z "$TAK_DOMAIN" ]; then
     echo "ERROR: Domain name is required"
     exit 1
 fi
+
+# Optional: additional domains that Caddy should serve certificates for / proxy
+# (comma-separated, no spaces preferred; spaces will be stripped)
+read -p 'Enter any additional domain(s) for Caddy (comma-separated), or leave blank: ' OTHER_DOMAINS
+OTHER_DOMAINS=$(echo "$OTHER_DOMAINS" | tr -d '[:space:]')
+
+# Build a list of domains (primary + optional additional)
+DOMAINS=("$TAK_DOMAIN")
+if [ -n "$OTHER_DOMAINS" ]; then
+    IFS=',' read -r -a EXTRA_DOMAINS <<< "$OTHER_DOMAINS"
+    for d in "${EXTRA_DOMAINS[@]}"; do
+        [ -n "$d" ] && DOMAINS+=("$d")
+    done
+fi
+
 
 echo ""
 echo "IMPORTANT: Before continuing, ensure you have:"
@@ -109,16 +124,37 @@ echo "=========================================="
 echo "Step 4: Configuring Caddy to Obtain Certificate"
 echo "=========================================="
 
-# Create temporary Caddyfile just to get the cert
+# Create Caddyfile for reverse proxy + certificate management
 cat > /etc/caddy/Caddyfile << EOF
 {
     email admin@$TAK_DOMAIN
 }
 
+# Primary TAK domain - reverse proxy to TAK web UI (8443).
+# NOTE: TAK enrollment (8446) and TAK client connections (8089) are not proxied by default.
 $TAK_DOMAIN {
-    respond "TAK Server - Certificate Obtained" 200
+    reverse_proxy https://127.0.0.1:8443 {
+        transport http {
+            tls_insecure_skip_verify
+        }
+    }
 }
 EOF
+
+# Add any additional domains as simple placeholders (edit later to add reverse_proxy rules)
+if [ "${#DOMAINS[@]}" -gt 1 ]; then
+    for d in "${DOMAINS[@]}"; do
+        if [ "$d" != "$TAK_DOMAIN" ]; then
+            cat >> /etc/caddy/Caddyfile << EOF
+
+$d {
+    respond "Caddy is up on $d" 200
+}
+EOF
+        fi
+    done
+fi
+
 
 # Open port 80 for Let's Encrypt challenge using UFW
 ufw allow 80/tcp
@@ -178,9 +214,9 @@ echo "=========================================="
 echo "Step 6: Configuring TAK Server to Use Certificate"
 echo "=========================================="
 
-# Stop Caddy (TAK Server will use the ports directly)
-systemctl stop caddy
-systemctl disable caddy
+# Keep Caddy running (reverse proxy + automatic renewals)
+systemctl enable caddy
+systemctl start caddy
 
 # Backup CoreConfig
 cp /opt/tak/CoreConfig.xml /opt/tak/CoreConfig.xml.backup
@@ -198,25 +234,58 @@ echo "=========================================="
 # Create renewal script
 cat > /opt/tak/renew-letsencrypt.sh << 'EOFRENEW'
 #!/bin/bash
-# TAK Server Let's Encrypt Certificate Renewal via Caddy
-# This script runs monthly via systemd timer
+# TAK Server Let's Encrypt Certificate Renewal helper (with TAK keystore refresh)
+# - Caddy is expected to be running continuously for reverse-proxy + auto-renewals.
+# - This script runs on a systemd timer and only refreshes TAK's JKS when the cert
+#   is within the renewal window.
+
+set -euo pipefail
 
 TAK_DOMAIN="DOMAIN_PLACEHOLDER"
 CERT_DIR="/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/$TAK_DOMAIN"
+CERT_CRT="$CERT_DIR/$TAK_DOMAIN.crt"
+CERT_KEY="$CERT_DIR/$TAK_DOMAIN.key"
 
-# Stop TAK Server
-systemctl stop takserver
+RENEW_WINDOW_DAYS=40
+LOG_FILE="/var/log/takserver-cert-renewal.log"
 
-# Start Caddy to renew certificate
-systemctl start caddy
+log() {
+  echo "[$(date -Is)] $*" | tee -a "$LOG_FILE"
+}
 
-# Wait for renewal
-sleep 60
+if [ ! -f "$CERT_CRT" ] || [ ! -f "$CERT_KEY" ]; then
+  log "ERROR: Caddy certificate files not found for $TAK_DOMAIN in $CERT_DIR"
+  exit 1
+fi
 
-# Convert new certificate
+# Calculate days remaining on the current cert
+END_DATE_RAW=$(openssl x509 -enddate -noout -in "$CERT_CRT" | cut -d= -f2)
+END_EPOCH=$(date -d "$END_DATE_RAW" +%s)
+NOW_EPOCH=$(date +%s)
+DAYS_LEFT=$(( (END_EPOCH - NOW_EPOCH) / 86400 ))
+
+log "Certificate days remaining for $TAK_DOMAIN: ${DAYS_LEFT} day(s)"
+
+if [ "$DAYS_LEFT" -gt "$RENEW_WINDOW_DAYS" ]; then
+  log "Outside renewal window (${RENEW_WINDOW_DAYS}d). No action taken."
+  exit 0
+fi
+
+log "Within renewal window (${RENEW_WINDOW_DAYS}d). Triggering Caddy reload/restart and refreshing TAK keystore..."
+
+# Ask Caddy to check/renew and reload config. If reload fails, fall back to restart.
+if ! systemctl reload caddy; then
+  log "Caddy reload failed; restarting Caddy..."
+  systemctl restart caddy
+fi
+
+# Give Caddy a moment to complete any ACME activity / file writes
+sleep 15
+
+# Rebuild TAK keystore from Caddy's cert/key
 openssl pkcs12 -export \
-  -in "$CERT_DIR/$TAK_DOMAIN.crt" \
-  -inkey "$CERT_DIR/$TAK_DOMAIN.key" \
+  -in "$CERT_CRT" \
+  -inkey "$CERT_KEY" \
   -out /tmp/takserver-le.p12 \
   -name "$TAK_DOMAIN" \
   -password pass:atakatak
@@ -228,18 +297,14 @@ keytool -importkeystore \
   -srckeystore /tmp/takserver-le.p12 \
   -srcstoretype pkcs12
 
-# Update TAK Server certificate
-rm /opt/tak/certs/files/takserver-le.jks
+rm -f /opt/tak/certs/files/takserver-le.jks
 mv /tmp/takserver-le.jks /opt/tak/certs/files/
 chown tak:tak /opt/tak/certs/files/takserver-le.jks
 
-# Stop Caddy
-systemctl stop caddy
+# Restart TAK to load the updated keystore (only happens inside the renewal window)
+systemctl restart takserver
 
-# Start TAK Server
-systemctl start takserver
-
-echo "Certificate renewed: $(date)" >> /var/log/takserver-cert-renewal.log
+log "TAK keystore refreshed and TAK restarted."
 EOFRENEW
 
 # Replace domain placeholder
