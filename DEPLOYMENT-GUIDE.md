@@ -361,6 +361,39 @@ docker logs -f takserver-$(cat tak/version.txt)
 
 Web UI: `https://YOUR-IP:8443` (import `admin.p12` as with native install).
 
+### Database port (5432)
+
+TAK Server reaches PostgreSQL over the Docker network (`tak-database`), so the database port only needs to be reachable from the host itself. The script and Compose file publish it on **`127.0.0.1:5432`** only. Docker-published ports bypass `ufw`/`firewalld`, so don't rely on the host firewall to keep 5432 closed.
+
+**Check an existing install** (run on the TAK host):
+
+```bash
+docker port takserver-db-$(cat tak/version.txt)   # want: 5432/tcp -> 127.0.0.1:5432
+ss -ltn | grep 5432                                # want: 127.0.0.1:5432, not 0.0.0.0:5432 or [::]:5432
+```
+
+**Fix an older install** that shows `0.0.0.0` or `[::]`:
+
+- **Compose:** change the DB `ports:` entry to `"127.0.0.1:5432:5432"` (or use the current `docker/docker-compose.yml`), then `docker compose up -d`. Data stays in the `tak-db-data` volume.
+- **Script install** (default `PERSIST_DB=true`, data in `~/tak-docker/tak-db-data`): from the extracted ZIP directory, recreate only the DB container with the loopback binding:
+
+  ```bash
+  VERSION="$(cat tak/version.txt)"
+  docker stop takserver-$VERSION
+  docker rm -f takserver-db-$VERSION
+  docker run -d -it \
+      -v ~/tak-docker/tak-db-data:/var/lib/postgresql/data:z \
+      -v "$(pwd)/tak":/opt/tak:z \
+      -p 127.0.0.1:5432:5432 \
+      --network takserver-$VERSION \
+      --network-alias tak-database \
+      --name takserver-db-$VERSION \
+      takserver-db:$VERSION
+  docker start takserver-$VERSION
+  ```
+
+  Use your own `INSTALL_DIR` in place of `~/tak-docker` if you changed it. If you set `PERSIST_DB=false`, the database lives inside the container: back it up before removing the container.
+
 For exact commands and hardened-image differences, use **§6** in [docs/TAK_Server_Configuration_Guide.pdf](docs/TAK_Server_Configuration_Guide.pdf) or the latest guide from [TAK.gov](https://tak.gov).
 
 ## SECTION 3: DOMAIN & SSL CONFIGURATION (OPTIONAL)

@@ -132,9 +132,9 @@ if [ ${#ZIPS[@]} -eq 0 ]; then
     echo "  and place the ZIP in: ${INSTALL_DIR}/"
     echo ""
     echo "  Examples:"
-    echo "    takserver-docker-5.6-RELEASE-6.zip"
-    echo "    takserver-docker-5.3-RELEASE-29.zip"
-    echo "    takserver-docker-hardened-5.6-RELEASE-6.zip"
+    echo "    takserver-docker-5.6-RELEASE-57.zip"
+    echo "    takserver-docker-5.7-RELEASE-43.zip"
+    echo "    takserver-docker-hardened-5.8-RELEASE-75.zip"
     echo ""
     exit 1
 elif [ ${#ZIPS[@]} -eq 1 ]; then
@@ -331,6 +331,9 @@ log "Network created: ${NETWORK_NAME}"
 step "8: Start Database Container"
 
 DB_CONTAINER="takserver-db-${VERSION}"
+# TAK Server reaches the DB over the Docker network (tak-database); publish
+# 5432 on loopback only so it stays off public interfaces.
+DB_PORT="127.0.0.1:5432:5432"
 
 # Stop/remove old container if exists
 $DOCKER rm -f "$DB_CONTAINER" 2>/dev/null || true
@@ -344,7 +347,7 @@ if [ "$PERSIST_DB" = true ]; then
         -v "${DB_DATA_DIR}":/var/lib/postgresql/data:z \
         -v "$(pwd)/tak":/opt/tak:z \
         -it \
-        -p 5432:5432 \
+        -p "$DB_PORT" \
         --network "$NETWORK_NAME" \
         --network-alias tak-database \
         --name "$DB_CONTAINER" \
@@ -353,7 +356,7 @@ else
     $DOCKER run -d \
         -v "$(pwd)/tak":/opt/tak:z \
         -it \
-        -p 5432:5432 \
+        -p "$DB_PORT" \
         --network "$NETWORK_NAME" \
         --network-alias tak-database \
         --name "$DB_CONTAINER" \

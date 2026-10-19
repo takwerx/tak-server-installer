@@ -13,8 +13,9 @@ services:
     volumes:
       - ./tak:/opt/tak:z
       - tak-db-data:/var/lib/postgresql/data
+    # TAK Server reaches the DB over tak-net; publish on loopback only (host psql/backups).
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     restart: unless-stopped
     networks:
       tak-net:
