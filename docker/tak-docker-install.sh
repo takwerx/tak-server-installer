@@ -37,7 +37,7 @@ CA_NAME="Yankee1"
 ADMIN_CERT="admin"
 CERT_PASS="atakatak"                       # default TAK cert password
 INSTALL_DIR="${HOME}/tak-docker"           # working directory
-PERSIST_DB=true                            # true = persist DB to host
+PERSIST_DB=true                            # true = mount ${INSTALL_DIR}/tak-db-data (hardened images keep the DB there; standard images keep it inside the container)
 
 # cert-metadata.sh values
 COUNTRY="US"
@@ -109,6 +109,21 @@ else
             exit 1
         fi
     done
+fi
+
+# A re-run replaces the DB container. The standard images keep the database
+# inside that container (not in tak-db-data), so a re-run would wipe it.
+EXISTING_DB=$($DOCKER ps -a --format '{{.Names}}' | grep '^takserver-db-' || true)
+if [ -n "$EXISTING_DB" ]; then
+    err "TAK database container already exists: $(echo $EXISTING_DB)"
+    echo ""
+    echo "  Re-running this installer would replace it and delete all TAK data."
+    echo "  To change the 5432 binding on this install, follow 'Database port (5432)'"
+    echo "  in DEPLOYMENT-GUIDE.md instead."
+    echo "  For a clean reinstall: back up, then remove the old containers first:"
+    echo "    docker rm -f takserver-<VERSION> takserver-db-<VERSION>"
+    echo ""
+    exit 1
 fi
 log "Prerequisites OK"
 

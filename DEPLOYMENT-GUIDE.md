@@ -344,7 +344,7 @@ cp /path/to/tak-server-installer/docker/docker-compose.yml .
 docker compose up -d
 ```
 
-`docker/docker-compose.yml` in this repo defines a shared network and DB alias **`tak-database`** so hostnames match the usual Docker guide expectations. Database data can persist in the named volume `tak-db-data`.
+`docker/docker-compose.yml` in this repo defines a shared network and DB alias **`tak-database`** so hostnames match the usual Docker guide expectations. With the standard (non-hardened) images the database lives inside the DB container, not in the `tak-db-data` volume: use `docker compose stop` / `start`, not `down`, and see **Database port (5432)** below before changing the DB service.
 
 ### Differences from native Rocky/Ubuntu scripts
 
@@ -374,25 +374,61 @@ ss -ltn | grep 5432                                # want: 127.0.0.1:5432, not 0
 
 **Fix an older install** that shows `0.0.0.0` or `[::]`:
 
-- **Compose:** change the DB `ports:` entry to `"127.0.0.1:5432:5432"` (or use the current `docker/docker-compose.yml`), then `docker compose up -d`. Data stays in the `tak-db-data` volume.
-- **Script install** (default `PERSIST_DB=true`, data in `~/tak-docker/tak-db-data`): from the extracted ZIP directory, recreate only the DB container with the loopback binding:
+> **Your data lives inside the DB container.** The standard (non-hardened) images keep PostgreSQL's data at `/var/lib/postgresql/15/data` inside the container, not in `tak-db-data`. Changing a published port means recreating the container, and a plain recreate (`docker rm`, `docker compose up -d` with a changed file, `docker compose down`, or re-running the installer) starts an **empty** database. The steps below snapshot the container first so the data comes along. Don't skip them.
 
-  ```bash
-  VERSION="$(cat tak/version.txt)"
-  docker stop takserver-$VERSION
-  docker rm -f takserver-db-$VERSION
-  docker run -d -it \
-      -v ~/tak-docker/tak-db-data:/var/lib/postgresql/data:z \
-      -v "$(pwd)/tak":/opt/tak:z \
-      -p 127.0.0.1:5432:5432 \
-      --network takserver-$VERSION \
-      --network-alias tak-database \
-      --name takserver-db-$VERSION \
-      takserver-db:$VERSION
-  docker start takserver-$VERSION
-  ```
+Run everything from the extracted ZIP directory (where `tak/` is). The snapshot needs free disk about the size of the database.
 
-  Use your own `INSTALL_DIR` in place of `~/tak-docker` if you changed it. If you set `PERSIST_DB=false`, the database lives inside the container: back it up before removing the container.
+1. **Back up and note your data** (both install types):
+
+   ```bash
+   export VERSION="$(cat tak/version.txt)"
+   docker exec -u postgres takserver-db-$VERSION pg_dumpall > tak-db-backup-$VERSION.sql
+   docker exec -u postgres takserver-db-$VERSION psql -d cot -tAc "select count(*) from cot_router"   # note this number
+   ```
+
+2. **Snapshot and recreate** the DB container with the loopback binding.
+
+   **Script install:**
+
+   ```bash
+   docker stop takserver-$VERSION takserver-db-$VERSION
+   docker commit takserver-db-$VERSION takserver-db-data:$VERSION
+   docker rm takserver-db-$VERSION
+   docker run -d -it \
+       -v ~/tak-docker/tak-db-data:/var/lib/postgresql/data:z \
+       -v "$(pwd)/tak":/opt/tak:z \
+       -p 127.0.0.1:5432:5432 \
+       --network takserver-$VERSION \
+       --network-alias tak-database \
+       --name takserver-db-$VERSION \
+       takserver-db-data:$VERSION
+   sleep 30
+   docker start takserver-$VERSION
+   ```
+
+   Use your own `INSTALL_DIR` in place of `~/tak-docker` if you changed it. If you set `PERSIST_DB=false`, leave out the `tak-db-data` line (standard images only: a hardened image with `PERSIST_DB=false` keeps its data in an unnamed volume that this recreate does not carry over).
+
+   **Compose:** don't just swap in the new compose file and run `docker compose up -d`; that recreates the DB from the empty image. Snapshot first and point the DB service at the snapshot:
+
+   ```bash
+   docker compose stop
+   docker commit takserver-db-$VERSION takserver-db-data:$VERSION
+   sed -i -e 's|image: takserver-db:|image: takserver-db-data:|' \
+          -e 's|"5432:5432"|"127.0.0.1:5432:5432"|' docker-compose.yml
+   grep -nE 'takserver-db-data|5432' docker-compose.yml   # want: image: takserver-db-data:${VERSION} and "127.0.0.1:5432:5432"
+   docker compose up -d
+   ```
+
+3. **Verify:** run the check above again (`127.0.0.1:5432`), and make sure the data is still there and TAK Server is connected:
+
+   ```bash
+   docker exec -u postgres takserver-db-$VERSION psql -d cot -tAc "select count(*) from cot_router"   # same number (or higher) as step 1
+   docker exec -u postgres takserver-db-$VERSION psql -d cot -tAc "select count(*) from pg_stat_activity where usename='martiuser'"   # above 0 once TAK is up (give it 1 to 2 minutes)
+   ```
+
+   Keep `tak-db-backup-$VERSION.sql` and the `takserver-db-data:$VERSION` image: the DB container now runs from that image, so don't delete it. Don't re-run the installer on this host; it would replace the DB container with an empty one (current versions of the script refuse to).
+
+**Hardened images** keep the database in the `tak-db-data` mount (`/var/lib/postgresql/data`), so it survives a recreate, but the steps above are safe for them too.
 
 For exact commands and hardened-image differences, use **§6** in [docs/TAK_Server_Configuration_Guide.pdf](docs/TAK_Server_Configuration_Guide.pdf) or the latest guide from [TAK.gov](https://tak.gov).
 
