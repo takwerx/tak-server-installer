@@ -38,6 +38,10 @@ ADMIN_CERT="admin"
 CERT_PASS="atakatak"                       # default TAK cert password
 INSTALL_DIR="${HOME}/tak-docker"           # working directory
 PERSIST_DB=true                            # true = mount ${INSTALL_DIR}/tak-db-data (hardened images keep the DB there; standard images keep it inside the container)
+# Standard 5.6/5.7 bundles build the DB image FROM postgres:15.1 (Debian bullseye),
+# whose PostgreSQL apt repo is retired, so that build fails. The installer swaps
+# that base for this one (same PostgreSQL 15). Set to "" to build the bundle as-is.
+DB_BASE_IMAGE="postgres:15-bookworm"
 
 # cert-metadata.sh values
 COUNTRY="US"
@@ -323,6 +327,19 @@ if [ -z "$DB_DOCKERFILE" ]; then
 fi
 
 log "Using Dockerfile: ${DB_DOCKERFILE}"
+
+# postgres:15 / 15.x / 15[.x]-bullseye no longer build (see DB_BASE_IMAGE above).
+# Build from a patched copy; the bundle's own Dockerfile is left untouched.
+OLD_BASE_RE='^([Ff][Rr][Oo][Mm][[:space:]]+)((docker\.io/)?(library/)?postgres:15(\.[0-9]+)*(-bullseye)?)([[:space:]]|$)'
+if [ -n "$DB_BASE_IMAGE" ] && grep -Eq "$OLD_BASE_RE" "$DB_DOCKERFILE"; then
+    OLD_BASE=$(grep -E "$OLD_BASE_RE" "$DB_DOCKERFILE" | head -1 | awk '{print $2}')
+    PATCHED_DOCKERFILE="${DB_DOCKERFILE}.patched"
+    sed -E "s#${OLD_BASE_RE}#\1${DB_BASE_IMAGE}\7#" "$DB_DOCKERFILE" > "$PATCHED_DOCKERFILE"
+    warn "DB image base ${OLD_BASE} no longer builds (retired apt repo); using ${DB_BASE_IMAGE} (same PostgreSQL 15)"
+    log "Patched copy: ${PATCHED_DOCKERFILE} (original unchanged)"
+    DB_DOCKERFILE="$PATCHED_DOCKERFILE"
+fi
+
 $DOCKER build -t takserver-db:"${VERSION}" -f "$DB_DOCKERFILE" .
 
 log "Database image built"

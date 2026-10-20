@@ -305,6 +305,12 @@ What the guide expects at a high level (matches `docker/tak-docker-install.sh`):
 
 For the newest PDF, always check [TAK.gov](https://tak.gov) in case the bundled copy is behind your deployment.
 
+**DB image base (5.6 / 5.7 standard bundles):** their `docker/Dockerfile.takserver-db` starts `FROM postgres:15.1`, which is Debian bullseye. The PostgreSQL apt repo for bullseye has been retired, so that build now fails at the `apt-get` step. `tak-docker-install.sh` builds from a patched copy (`Dockerfile.takserver-db.patched`) based on `postgres:15-bookworm` (same PostgreSQL 15) and logs the swap; the bundle's own file is not changed. Hardened bundles are not touched. Set `DB_BASE_IMAGE=""` in the script to build the bundle as-is. Building by hand, make the same one-line change first:
+
+```bash
+sed -i 's#^FROM postgres:15.1#FROM postgres:15-bookworm#' docker/Dockerfile.takserver-db
+```
+
 ### When to use Docker
 
 - You want TAK Server and PostgreSQL in containers (no native `takserver` systemd service on the host).
