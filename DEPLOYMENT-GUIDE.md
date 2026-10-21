@@ -305,6 +305,12 @@ What the guide expects at a high level (matches `docker/tak-docker-install.sh`):
 
 For the newest PDF, always check [TAK.gov](https://tak.gov) in case the bundled copy is behind your deployment.
 
+**DB image base (5.6 / 5.7 standard bundles):** their `docker/Dockerfile.takserver-db` starts `FROM postgres:15.1`, which is Debian bullseye. The PostgreSQL apt repo for bullseye has been retired, so that build now fails at the `apt-get` step. `tak-docker-install.sh` builds from a patched copy (`Dockerfile.takserver-db.patched`) based on `postgres:15-bookworm` (same PostgreSQL 15) and logs the swap; the bundle's own file is not changed. Hardened bundles are not touched. Set `DB_BASE_IMAGE=""` in the script to build the bundle as-is. Building by hand, make the same one-line change first:
+
+```bash
+sed -i 's#^FROM postgres:15.1#FROM postgres:15-bookworm#' docker/Dockerfile.takserver-db
+```
+
 ### When to use Docker
 
 - You want TAK Server and PostgreSQL in containers (no native `takserver` systemd service on the host).
@@ -344,7 +350,7 @@ cp /path/to/tak-server-installer/docker/docker-compose.yml .
 docker compose up -d
 ```
 
-`docker/docker-compose.yml` in this repo defines a shared network and DB alias **`tak-database`** so hostnames match the usual Docker guide expectations. Database data can persist in the named volume `tak-db-data`.
+`docker/docker-compose.yml` in this repo defines a shared network and DB alias **`tak-database`** so hostnames match the usual Docker guide expectations. With the standard (non-hardened) images the database lives inside the DB container, not in the `tak-db-data` volume: use `docker compose stop` / `start`, not `down`, and see **Database port (5432)** below before changing the DB service.
 
 ### Differences from native Rocky/Ubuntu scripts
 
@@ -360,6 +366,75 @@ docker logs -f takserver-$(cat tak/version.txt)
 ```
 
 Web UI: `https://YOUR-IP:8443` (import `admin.p12` as with native install).
+
+### Database port (5432)
+
+TAK Server reaches PostgreSQL over the Docker network (`tak-database`), so the database port only needs to be reachable from the host itself. The script and Compose file publish it on **`127.0.0.1:5432`** only. Docker-published ports bypass `ufw`/`firewalld`, so don't rely on the host firewall to keep 5432 closed.
+
+**Check an existing install** (run on the TAK host):
+
+```bash
+docker port takserver-db-$(cat tak/version.txt)   # want: 5432/tcp -> 127.0.0.1:5432
+ss -ltn | grep 5432                                # want: 127.0.0.1:5432, not 0.0.0.0:5432 or [::]:5432
+```
+
+**Fix an older install** that shows `0.0.0.0` or `[::]`:
+
+> **Your data lives inside the DB container.** The standard (non-hardened) images keep PostgreSQL's data at `/var/lib/postgresql/15/data` inside the container, not in `tak-db-data`. Changing a published port means recreating the container, and a plain recreate (`docker rm`, `docker compose up -d` with a changed file, `docker compose down`, or re-running the installer) starts an **empty** database. The steps below snapshot the container first so the data comes along. Don't skip them.
+
+Run everything from the extracted ZIP directory (where `tak/` is). The snapshot needs free disk about the size of the database.
+
+1. **Back up and note your data** (both install types):
+
+   ```bash
+   export VERSION="$(cat tak/version.txt)"
+   docker exec -u postgres takserver-db-$VERSION pg_dumpall > tak-db-backup-$VERSION.sql
+   docker exec -u postgres takserver-db-$VERSION psql -d cot -tAc "select count(*) from cot_router"   # note this number
+   ```
+
+2. **Snapshot and recreate** the DB container with the loopback binding.
+
+   **Script install:**
+
+   ```bash
+   docker stop takserver-$VERSION takserver-db-$VERSION
+   docker commit takserver-db-$VERSION takserver-db-data:$VERSION
+   docker rm takserver-db-$VERSION
+   docker run -d -it \
+       -v ~/tak-docker/tak-db-data:/var/lib/postgresql/data:z \
+       -v "$(pwd)/tak":/opt/tak:z \
+       -p 127.0.0.1:5432:5432 \
+       --network takserver-$VERSION \
+       --network-alias tak-database \
+       --name takserver-db-$VERSION \
+       takserver-db-data:$VERSION
+   sleep 30
+   docker start takserver-$VERSION
+   ```
+
+   Use your own `INSTALL_DIR` in place of `~/tak-docker` if you changed it. If you set `PERSIST_DB=false`, leave out the `tak-db-data` line (standard images only: a hardened image with `PERSIST_DB=false` keeps its data in an unnamed volume that this recreate does not carry over).
+
+   **Compose:** don't just swap in the new compose file and run `docker compose up -d`; that recreates the DB from the empty image. Snapshot first and point the DB service at the snapshot:
+
+   ```bash
+   docker compose stop
+   docker commit takserver-db-$VERSION takserver-db-data:$VERSION
+   sed -i -e 's|image: takserver-db:|image: takserver-db-data:|' \
+          -e 's|"5432:5432"|"127.0.0.1:5432:5432"|' docker-compose.yml
+   grep -nE 'takserver-db-data|5432' docker-compose.yml   # want: image: takserver-db-data:${VERSION} and "127.0.0.1:5432:5432"
+   docker compose up -d
+   ```
+
+3. **Verify:** run the check above again (`127.0.0.1:5432`), and make sure the data is still there and TAK Server is connected:
+
+   ```bash
+   docker exec -u postgres takserver-db-$VERSION psql -d cot -tAc "select count(*) from cot_router"   # same number (or higher) as step 1
+   docker exec -u postgres takserver-db-$VERSION psql -d cot -tAc "select count(*) from pg_stat_activity where usename='martiuser'"   # above 0 once TAK is up (give it 1 to 2 minutes)
+   ```
+
+   Keep `tak-db-backup-$VERSION.sql` and the `takserver-db-data:$VERSION` image: the DB container now runs from that image, so don't delete it. Don't re-run the installer on this host; it would replace the DB container with an empty one (current versions of the script refuse to).
+
+**Hardened images** keep the database in the `tak-db-data` mount (`/var/lib/postgresql/data`), so it survives a recreate, but the steps above are safe for them too.
 
 For exact commands and hardened-image differences, use **§6** in [docs/TAK_Server_Configuration_Guide.pdf](docs/TAK_Server_Configuration_Guide.pdf) or the latest guide from [TAK.gov](https://tak.gov).
 

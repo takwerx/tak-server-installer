@@ -37,7 +37,11 @@ CA_NAME="Yankee1"
 ADMIN_CERT="admin"
 CERT_PASS="atakatak"                       # default TAK cert password
 INSTALL_DIR="${HOME}/tak-docker"           # working directory
-PERSIST_DB=true                            # true = persist DB to host
+PERSIST_DB=true                            # true = mount ${INSTALL_DIR}/tak-db-data (hardened images keep the DB there; standard images keep it inside the container)
+# Standard 5.6/5.7 bundles build the DB image FROM postgres:15.1 (Debian bullseye),
+# whose PostgreSQL apt repo is retired, so that build fails. The installer swaps
+# that base for this one (same PostgreSQL 15). Set to "" to build the bundle as-is.
+DB_BASE_IMAGE="postgres:15-bookworm"
 
 # cert-metadata.sh values
 COUNTRY="US"
@@ -110,6 +114,21 @@ else
         fi
     done
 fi
+
+# A re-run replaces the DB container. The standard images keep the database
+# inside that container (not in tak-db-data), so a re-run would wipe it.
+EXISTING_DB=$($DOCKER ps -a --format '{{.Names}}' | grep '^takserver-db-' || true)
+if [ -n "$EXISTING_DB" ]; then
+    err "TAK database container already exists: $(echo $EXISTING_DB)"
+    echo ""
+    echo "  Re-running this installer would replace it and delete all TAK data."
+    echo "  To change the 5432 binding on this install, follow 'Database port (5432)'"
+    echo "  in DEPLOYMENT-GUIDE.md instead."
+    echo "  For a clean reinstall: back up, then remove the old containers first:"
+    echo "    docker rm -f takserver-<VERSION> takserver-db-<VERSION>"
+    echo ""
+    exit 1
+fi
 log "Prerequisites OK"
 
 #----------------------------------------------------------------------
@@ -132,9 +151,9 @@ if [ ${#ZIPS[@]} -eq 0 ]; then
     echo "  and place the ZIP in: ${INSTALL_DIR}/"
     echo ""
     echo "  Examples:"
-    echo "    takserver-docker-5.6-RELEASE-6.zip"
-    echo "    takserver-docker-5.3-RELEASE-29.zip"
-    echo "    takserver-docker-hardened-5.6-RELEASE-6.zip"
+    echo "    takserver-docker-5.6-RELEASE-57.zip"
+    echo "    takserver-docker-5.7-RELEASE-43.zip"
+    echo "    takserver-docker-hardened-5.8-RELEASE-75.zip"
     echo ""
     exit 1
 elif [ ${#ZIPS[@]} -eq 1 ]; then
@@ -308,6 +327,19 @@ if [ -z "$DB_DOCKERFILE" ]; then
 fi
 
 log "Using Dockerfile: ${DB_DOCKERFILE}"
+
+# postgres:15 / 15.x / 15[.x]-bullseye no longer build (see DB_BASE_IMAGE above).
+# Build from a patched copy; the bundle's own Dockerfile is left untouched.
+OLD_BASE_RE='^([Ff][Rr][Oo][Mm][[:space:]]+)((docker\.io/)?(library/)?postgres:15(\.[0-9]+)*(-bullseye)?)([[:space:]]|$)'
+if [ -n "$DB_BASE_IMAGE" ] && grep -Eq "$OLD_BASE_RE" "$DB_DOCKERFILE"; then
+    OLD_BASE=$(grep -E "$OLD_BASE_RE" "$DB_DOCKERFILE" | head -1 | awk '{print $2}')
+    PATCHED_DOCKERFILE="${DB_DOCKERFILE}.patched"
+    sed -E "s#${OLD_BASE_RE}#\1${DB_BASE_IMAGE}\7#" "$DB_DOCKERFILE" > "$PATCHED_DOCKERFILE"
+    warn "DB image base ${OLD_BASE} no longer builds (retired apt repo); using ${DB_BASE_IMAGE} (same PostgreSQL 15)"
+    log "Patched copy: ${PATCHED_DOCKERFILE} (original unchanged)"
+    DB_DOCKERFILE="$PATCHED_DOCKERFILE"
+fi
+
 $DOCKER build -t takserver-db:"${VERSION}" -f "$DB_DOCKERFILE" .
 
 log "Database image built"
@@ -331,6 +363,9 @@ log "Network created: ${NETWORK_NAME}"
 step "8: Start Database Container"
 
 DB_CONTAINER="takserver-db-${VERSION}"
+# TAK Server reaches the DB over the Docker network (tak-database); publish
+# 5432 on loopback only so it stays off public interfaces.
+DB_PORT="127.0.0.1:5432:5432"
 
 # Stop/remove old container if exists
 $DOCKER rm -f "$DB_CONTAINER" 2>/dev/null || true
@@ -344,7 +379,7 @@ if [ "$PERSIST_DB" = true ]; then
         -v "${DB_DATA_DIR}":/var/lib/postgresql/data:z \
         -v "$(pwd)/tak":/opt/tak:z \
         -it \
-        -p 5432:5432 \
+        -p "$DB_PORT" \
         --network "$NETWORK_NAME" \
         --network-alias tak-database \
         --name "$DB_CONTAINER" \
@@ -353,7 +388,7 @@ else
     $DOCKER run -d \
         -v "$(pwd)/tak":/opt/tak:z \
         -it \
-        -p 5432:5432 \
+        -p "$DB_PORT" \
         --network "$NETWORK_NAME" \
         --network-alias tak-database \
         --name "$DB_CONTAINER" \
