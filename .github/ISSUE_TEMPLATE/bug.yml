@@ -1,0 +1,109 @@
+name: Bug report
+description: "An install, SSL or hardening script failed or did the wrong thing"
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. The fields below are required because they decide whether this is
+        an already-fixed bug or a live one; without them the first reply is always "which OS,
+        which TAK Server?".
+
+        **This repository is public.** Before you paste a log or attach a screenshot, remove
+        passwords, tokens, keys, callsigns, coordinates, hostnames and IP addresses you do not want published.
+  - type: input
+    id: version
+    attributes:
+      label: "Installer version"
+      description: "Run `git describe --tags --always` in the folder you cloned, or give the date you cloned it."
+      placeholder: "e.g. a commit like 3f2a1c9"
+    validations:
+      required: true
+  - type: input
+    id: takserver
+    attributes:
+      label: "TAK Server version"
+      description: "The version of the zip, deb or rpm from tak.gov."
+      placeholder: "e.g. 5.4-RELEASE-xx"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: "OS"
+      options:
+        - "Rocky Linux 9"
+        - "Ubuntu 22.04"
+        - "Other (say which below)"
+    validations:
+      required: true
+  - type: dropdown
+    id: arch
+    attributes:
+      label: "Architecture"
+      options:
+        - "x86_64"
+        - "ARM64 / aarch64"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: "Install type"
+      options:
+        - "Single server (install.sh)"
+        - "Docker (official docker zip)"
+        - "Split two-server (TAK Server and database on different hosts)"
+        - "Remote or external database"
+        - "Other (say which below)"
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: "Where it runs"
+      options:
+        - "Cloud (AWS, Azure, Oracle, other)"
+        - "On-prem or home lab"
+        - "Not sure"
+    validations:
+      required: true
+  - type: dropdown
+    id: script
+    attributes:
+      label: "Which script failed or misbehaved"
+      options:
+        - "install.sh"
+        - "caddy-setup.sh"
+        - "hardening.sh"
+        - "docker/tak-docker-install.sh"
+        - "Other or not sure"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: "What happened"
+      description: |
+        What you ran, what you expected, and what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: "Steps to reproduce"
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: "Logs"
+      description: |
+        The last 50 or so lines of the script's output, and anything relevant from `/opt/tak/logs/` or `journalctl`. Paste as text rather than a screenshot where you can.
+      render: shell
+    validations:
+      required: false
