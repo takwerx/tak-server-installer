@@ -32,7 +32,6 @@ body:
     attributes:
       label: "OS"
       options:
-        - "Rocky Linux 9"
         - "Ubuntu 22.04"
         - "Other (say which below)"
     validations:
