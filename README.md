@@ -3,9 +3,11 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![TAK Server](https://img.shields.io/badge/TAK%20Server-5.x-blue)](https://tak.gov)
 
-**Production-ready TAK Server deployment scripts for Rocky Linux 9 and Ubuntu 22.04**, plus an optional **Docker** workflow using the official `takserver-docker-*.zip` from [TAK.gov](https://tak.gov).
+**Production-ready TAK Server deployment scripts for Ubuntu 22.04**, plus an optional **Docker** workflow using the official `takserver-docker-*.zip` from [TAK.gov](https://tak.gov).
 
 Automated installation, SSL configuration, and comprehensive monitoring for TAK Server deployments. Created and maintained by [The TAK Syndicate](https://www.thetaksyndicate.org).
+
+> **Rocky Linux 9 / RHEL 9:** scripts for these are not in this repo yet. Today it ships Ubuntu 22.04 and Docker only.
 
 ---
 
@@ -18,16 +20,13 @@ Automated installation, SSL configuration, and comprehensive monitoring for TAK 
 git clone https://github.com/takwerx/tak-server-installer.git
 cd tak-server-installer
 
-# 2. Choose your OS and run install script
-# Rocky Linux 9:
-sudo ./rocky-9/install.sh
-
-# Ubuntu 22.04:
-sudo ./ubuntu-22.04/install.sh
+# 2. Run the install script (Ubuntu 22.04)
+cd ubuntu-22.04
+sudo ./Ubuntu_22.04_TAK_Server_install.sh
 
 # 3. (Optional) Add SSL and hardening
-sudo ./rocky-9/caddy-setup.sh      # or ubuntu-22.04/caddy-setup.sh
-sudo ./rocky-9/hardening.sh        # or ubuntu-22.04/hardening.sh
+sudo ./Ubuntu_22.04_Caddy_setup.sh
+sudo ./Ubuntu_22.04_TAK_Server_Hardening.sh
 ```
 
 **Docker (optional):** use the official Docker ZIP, then run `./docker/tak-docker-install.sh` (see [DEPLOYMENT-GUIDE.md](DEPLOYMENT-GUIDE.md#docker-tak-server-using-official-docker-zip-optional)).
@@ -73,7 +72,7 @@ sudo ./rocky-9/hardening.sh        # or ubuntu-22.04/hardening.sh
 ## 📋 What You Need
 
 ### Required
-- Fresh VPS with Rocky Linux 9, RHEL 9, or Ubuntu 22.04
+- Fresh VPS with Ubuntu 22.04
 - 8GB RAM minimum (16GB recommended)
 - 50GB storage minimum (100GB+ recommended)
 - 4 CPU cores minimum
@@ -90,19 +89,16 @@ sudo ./rocky-9/hardening.sh        # or ubuntu-22.04/hardening.sh
 
 ```
 tak-server-installer/
-├── rocky-9/
-│   ├── install.sh              # TAK Server installation
-│   ├── caddy-setup.sh          # SSL/Let's Encrypt setup
-│   └── hardening.sh            # Production hardening & monitoring
 ├── ubuntu-22.04/
-│   ├── install.sh              # TAK Server installation
-│   ├── caddy-setup.sh          # SSL/Let's Encrypt setup
-│   └── hardening.sh            # Production hardening & monitoring
+│   ├── Ubuntu_22.04_TAK_Server_install.sh    # TAK Server installation
+│   ├── Ubuntu_22.04_Caddy_setup.sh           # SSL/Let's Encrypt setup
+│   └── Ubuntu_22.04_TAK_Server_Hardening.sh  # Production hardening & monitoring
 ├── docker/
 │   ├── tak-docker-install.sh   # Install from takserver-docker-*.zip
 │   └── docker-compose.yml      # Optional stack after images are built
 ├── docs/
-│   └── guard-dogs.md           # Guard Dog monitoring explained
+│   ├── guard-dogs.md           # Guard Dog monitoring explained
+│   └── PLATFORM_REFERENCE.md   # Outside services this repo depends on
 ├── DEPLOYMENT-GUIDE.md         # Complete deployment guide
 ├── QUICK-START.md              # Fast deployment instructions
 └── README.md                   # This file
@@ -115,14 +111,10 @@ tak-server-installer/
 ### Step 1: Install TAK Server
 Installs TAK Server, PostgreSQL, creates certificates, configures firewall.
 
-**Rocky Linux 9:**
-```bash
-sudo ./rocky-9/install.sh
-```
-
 **Ubuntu 22.04:**
 ```bash
-sudo ./ubuntu-22.04/install.sh
+cd ubuntu-22.04
+sudo ./Ubuntu_22.04_TAK_Server_install.sh
 ```
 
 **What it does:**
@@ -141,14 +133,10 @@ sudo ./ubuntu-22.04/install.sh
 
 Adds Let's Encrypt SSL certificate for your domain.
 
-**Rocky Linux 9:**
-```bash
-sudo ./rocky-9/caddy-setup.sh
-```
-
 **Ubuntu 22.04:**
 ```bash
-sudo ./ubuntu-22.04/caddy-setup.sh
+cd ubuntu-22.04
+sudo ./Ubuntu_22.04_Caddy_setup.sh
 ```
 
 **What it does:**
@@ -167,14 +155,10 @@ sudo ./ubuntu-22.04/caddy-setup.sh
 
 Adds production-grade monitoring and reliability.
 
-**Rocky Linux 9:**
-```bash
-sudo ./rocky-9/hardening.sh
-```
-
 **Ubuntu 22.04:**
 ```bash
-sudo ./ubuntu-22.04/hardening.sh
+cd ubuntu-22.04
+sudo ./Ubuntu_22.04_TAK_Server_Hardening.sh
 ```
 
 **What it does:**
@@ -294,4 +278,4 @@ It helps others find it and motivates continued development.
 
 **Latest Update:** January 2026  
 **Compatible with:** TAK Server 5.x series  
-**Tested on:** Rocky Linux 9, RHEL 9, Ubuntu 22.04 LTS; Docker path uses the official container bundle from TAK.gov
+**Tested on:** Ubuntu 22.04 LTS; Docker path uses the official container bundle from TAK.gov

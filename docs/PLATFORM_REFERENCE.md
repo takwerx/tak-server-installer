@@ -7,7 +7,7 @@ The outside things these scripts depend on, so nobody has to rediscover them. Ea
 
 Observed behavior that disagrees with the official docs gets written next to it, never deleted.
 
-Scope: `ubuntu-22.04/` scripts, `docker/` and `patches/`. (The README also mentions `rocky-9/` scripts; they are not in this repo.)
+Scope: `ubuntu-22.04/` scripts, `docker/` and `patches/`. There are no Rocky/RHEL scripts: `rocky-9/` never existed in this repo's history (checked all 111 commits, all branches and PR refs), so the docs no longer promise it.
 
 ## TAK Server (tak.gov)
 
