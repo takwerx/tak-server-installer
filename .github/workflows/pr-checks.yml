@@ -33,10 +33,23 @@ jobs:
       - run: pip install shellcheck-py==0.11.0.1 pyyaml && shellcheck --version
       - run: bash .github/ci/static_checks.sh
 
+  # Version file matches the newest tag and the newest release-notes section is that version (ops #372).
+  # Passes with a warning until the repo has a release tag, a VERSION file and a CHANGELOG.md.
+  release-hygiene:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0   # tags are needed to find the newest release
+          persist-credentials: false
+      - run: bash .github/ci/test_release_hygiene.sh
+      - run: bash .github/ci/release_hygiene.sh
+
   # One stable name to require in branch protection. A failed or cancelled job fails it.
   checks-ok:
     if: always()
-    needs: [static]
+    needs: [static, release-hygiene]
     runs-on: ubuntu-24.04
     steps:
       - env:
