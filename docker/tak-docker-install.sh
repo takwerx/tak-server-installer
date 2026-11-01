@@ -257,6 +257,13 @@ fi
 cd "$TAK_DIR"
 log "Working directory: $(pwd)"
 
+# The 5.8 hardened zip ships its shell scripts without the execute bit (tak/db-utils/configureInDocker.sh is -rw-rw-rw-).
+# ./tak is bind-mounted over /opt/tak, so the containers see the files exactly as unzip left them and the database
+# container fails with "permission denied". Make every script under tak/ executable (harmless for 5.6/5.7).
+if [ -d "tak" ]; then
+    find tak -type f -name '*.sh' -exec chmod +x {} +
+fi
+
 # Get version string from version.txt
 if [ -f "tak/version.txt" ]; then
     VERSION=$(cat tak/version.txt)
