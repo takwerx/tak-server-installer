@@ -97,6 +97,9 @@ fi
 # BuildKit (docker buildx). The 5.8 hardened Dockerfiles read ARG TARGETARCH,
 # which only BuildKit fills in; the legacy builder leaves it empty and the
 # database image build fails on a 404 for the PostgreSQL repo package.
+# Try to install it here; step 6 stops only if the bundle needs it (5.6/5.7
+# built fine on the legacy builder, so they only get a warning).
+HAVE_BUILDX=0
 if ! $DOCKER buildx version &>/dev/null; then
     warn "Docker buildx (BuildKit) not found. Installing..."
     if command -v apt-get &>/dev/null; then
@@ -104,15 +107,13 @@ if ! $DOCKER buildx version &>/dev/null; then
     elif command -v dnf &>/dev/null; then
         sudo dnf install -y docker-buildx-plugin || true
     fi
-    if ! $DOCKER buildx version &>/dev/null; then
-        err "Docker buildx (BuildKit) is missing and could not be installed."
-        echo "  The TAK Server 5.8 images need it to detect the CPU type."
-        echo "  Ubuntu/Debian: sudo apt-get install docker-buildx"
-        echo "  RHEL/Rocky:    sudo dnf install docker-buildx-plugin (Docker's own repo)"
-        exit 1
-    fi
 fi
-log "Docker buildx: $($DOCKER buildx version | head -1)"
+if $DOCKER buildx version &>/dev/null; then
+    HAVE_BUILDX=1
+    log "Docker buildx: $($DOCKER buildx version | head -1)"
+else
+    warn "Docker buildx (BuildKit) is not available. TAK Server 5.8 images need it; older bundles build without it."
+fi
 
 # Required tools
 if command -v apt-get &>/dev/null; then
@@ -350,6 +351,15 @@ if [ -z "$DB_DOCKERFILE" ]; then
 fi
 
 log "Using Dockerfile: ${DB_DOCKERFILE}"
+
+# Hardened 5.8 bundles read ARG TARGETARCH, which the legacy builder leaves empty.
+if [ "$HAVE_BUILDX" -eq 0 ] && grep -Eq '^[[:space:]]*ARG[[:space:]]+TARGETARCH' "$DB_DOCKERFILE"; then
+    err "This TAK Server bundle needs Docker BuildKit (docker buildx) to detect the CPU type, and it is not installed."
+    echo "  Ubuntu/Debian: sudo apt-get install docker-buildx"
+    echo "  RHEL/Rocky:    sudo dnf install docker-buildx-plugin (Docker's own repo)"
+    echo "  Then re-run this script."
+    exit 1
+fi
 
 # postgres:15 / 15.x / 15[.x]-bullseye no longer build (see DB_BASE_IMAGE above).
 # Build from a patched copy; the bundle's own Dockerfile is left untouched.
