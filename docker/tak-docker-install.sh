@@ -257,6 +257,18 @@ fi
 cd "$TAK_DIR"
 log "Working directory: $(pwd)"
 
+# The 5.8 hardened zip ships its shell scripts without the execute bit (tak/db-utils/configureInDocker.sh is -rw-rw-rw-).
+# ./tak is bind-mounted over /opt/tak, so the containers see the files exactly as unzip left them and the database
+# container fails with "permission denied". Make every script under tak/ executable (harmless for 5.6/5.7).
+if [ -d "tak" ]; then
+    find tak -type f -name '*.sh' -exec chmod +x {} +
+    # The 5.8 hardened images run as non-root users in group 0 (tak:0 and postgres:0) and the bind mount hides the
+    # ownership the image set up. Unzipped as root, tak/ is root:root with no group write, so TAK Server stops at
+    # "tee: /opt/tak/logs/takserver.log: Permission denied" and "AccessDeniedException: TAKIgniteConfig.xml".
+    # Give group 0 write access (harmless for 5.6/5.7, whose containers run as root).
+    chmod -R g+rwX tak
+fi
+
 # Get version string from version.txt
 if [ -f "tak/version.txt" ]; then
     VERSION=$(cat tak/version.txt)
@@ -407,6 +419,23 @@ if [ "$PERSIST_DB" = true ]; then
     DB_DATA_DIR="${INSTALL_DIR}/tak-db-data"
     mkdir -p "$DB_DATA_DIR"
     log "Database persistence: ${DB_DATA_DIR}"
+    # The 5.8 hardened database image runs PostgreSQL as a non-root user (postgres:0). PostgreSQL refuses a data
+    # directory it does not own, so on a root-owned folder it never starts ("localhost:5432 - no response" forever).
+    # Hand the folder to whatever user the image runs as; 5.6/5.7 images run as root and are left alone.
+    DB_RUN_UID=$($DOCKER run --rm --entrypoint id takserver-db:"${VERSION}" -u 2>/dev/null | tr -d '[:space:]' || true)
+    if [[ "$DB_RUN_UID" =~ ^[0-9]+$ ]] && [ "$DB_RUN_UID" != "0" ]; then
+        chown "${DB_RUN_UID}:0" "$DB_DATA_DIR"
+        chmod 700 "$DB_DATA_DIR"
+        log "Database folder owned by uid ${DB_RUN_UID} (the user the database image runs as)"
+        # That image also runs initdb while it is built, and an empty bind-mounted folder hides the result
+        # ("pg_ctl: directory ... is not a database cluster directory"). Copy the image's cluster in on first use.
+        if [ -z "$(ls -A "$DB_DATA_DIR" 2>/dev/null)" ]; then
+            $DOCKER run --rm --entrypoint sh -v "${DB_DATA_DIR}":/seed:z takserver-db:"${VERSION}" \
+                -c 'cp -a /var/lib/postgresql/data/. /seed/' \
+                || { err "Could not initialise the database folder ${DB_DATA_DIR}"; exit 1; }
+            log "Database folder initialised from the image"
+        fi
+    fi
 
     $DOCKER run -d \
         -v "${DB_DATA_DIR}":/var/lib/postgresql/data:z \
@@ -467,7 +496,38 @@ if [ -z "$TAK_DOCKERFILE" ]; then
 fi
 
 log "Using Dockerfile: ${TAK_DOCKERFILE}"
-$DOCKER build -t takserver:"${VERSION}" -f "$TAK_DOCKERFILE" .
+
+# The 5.8 hardened Dockerfile blocks openssl updates (exclude=openssl*) and then runs a full "microdnf update" from the
+# live UBI 10 repo. Once the repo ships a curl that needs a newer openssl than its pinned Temurin base image carries,
+# that step fails with "Could not depsolve transaction" (seen Nov 1, 2026: base 17.0.19_10 has openssl-libs 3.5.5, the
+# repo wants >= 3.5.8). A newer Temurin 17 UBI 10 image of the same JDK line carries the newer openssl. The bundle's
+# Dockerfile is not edited: its own ARG BASE_DEPLOY_TAG is overridden with --build-arg, and only after its own tag failed.
+# Set TAK_BASE_DEPLOY_TAG to force a tag on the first try.
+FALLBACK_BASE_TAG="17.0.20.1_1-jdk-ubi10-minimal"
+BUILD_LOG=$(mktemp)
+BUILD_ARGS=()
+if [ -n "${TAK_BASE_DEPLOY_TAG:-}" ] && grep -Eq '^ARG[[:space:]]+BASE_DEPLOY_TAG' "$TAK_DOCKERFILE"; then
+    log "Using base image tag from TAK_BASE_DEPLOY_TAG: ${TAK_BASE_DEPLOY_TAG}"
+    BUILD_ARGS=(--build-arg "BASE_DEPLOY_TAG=${TAK_BASE_DEPLOY_TAG}")
+fi
+set -o pipefail   # so a failed build is not hidden by tee
+if ! $DOCKER build "${BUILD_ARGS[@]}" -t takserver:"${VERSION}" -f "$TAK_DOCKERFILE" . 2>&1 | tee "$BUILD_LOG"; then
+    set +o pipefail
+    if [ ${#BUILD_ARGS[@]} -eq 0 ] \
+        && grep -Eq '^ARG[[:space:]]+BASE_DEPLOY_TAG' "$TAK_DOCKERFILE" \
+        && grep -q 'Could not depsolve transaction' "$BUILD_LOG" \
+        && grep -q 'openssl' "$BUILD_LOG"; then
+        warn "The bundle's base image can no longer take the current UBI 10 updates (its openssl is older than the repo's curl needs)."
+        warn "Retrying once with a newer Temurin base image: ${FALLBACK_BASE_TAG} (same JDK 17). The bundle's own Dockerfile is unchanged."
+        $DOCKER build --build-arg "BASE_DEPLOY_TAG=${FALLBACK_BASE_TAG}" -t takserver:"${VERSION}" -f "$TAK_DOCKERFILE" . \
+            || { err "TAK Server image build failed again with ${FALLBACK_BASE_TAG}."; rm -f "$BUILD_LOG"; exit 1; }
+    else
+        rm -f "$BUILD_LOG"
+        exit 1
+    fi
+fi
+set +o pipefail
+rm -f "$BUILD_LOG"
 
 log "TAK Server image built"
 
