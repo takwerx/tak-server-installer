@@ -419,6 +419,15 @@ if [ "$PERSIST_DB" = true ]; then
     DB_DATA_DIR="${INSTALL_DIR}/tak-db-data"
     mkdir -p "$DB_DATA_DIR"
     log "Database persistence: ${DB_DATA_DIR}"
+    # The 5.8 hardened database image runs PostgreSQL as a non-root user (postgres:0). PostgreSQL refuses a data
+    # directory it does not own, so on a root-owned folder it never starts ("localhost:5432 - no response" forever).
+    # Hand the folder to whatever user the image runs as; 5.6/5.7 images run as root and are left alone.
+    DB_RUN_UID=$($DOCKER run --rm --entrypoint id takserver-db:"${VERSION}" -u 2>/dev/null | tr -d '[:space:]' || true)
+    if [[ "$DB_RUN_UID" =~ ^[0-9]+$ ]] && [ "$DB_RUN_UID" != "0" ]; then
+        chown "${DB_RUN_UID}:0" "$DB_DATA_DIR"
+        chmod 700 "$DB_DATA_DIR"
+        log "Database folder owned by uid ${DB_RUN_UID} (the user the database image runs as)"
+    fi
 
     $DOCKER run -d \
         -v "${DB_DATA_DIR}":/var/lib/postgresql/data:z \
