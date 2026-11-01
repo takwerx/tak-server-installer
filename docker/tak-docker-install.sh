@@ -57,12 +57,15 @@ step "0: Prerequisites"
 
 install_docker_apt() {
     sudo apt-get update
-    sudo apt-get install -y docker.io
+    # docker-buildx gives docker.io BuildKit. Without it Docker uses the legacy
+    # builder, which leaves ARG TARGETARCH empty in the 5.8 hardened Dockerfiles.
+    sudo apt-get install -y docker.io docker-buildx
     sudo systemctl enable --now docker
 }
 
 install_docker_dnf() {
     sudo dnf install -y docker
+    sudo dnf install -y docker-buildx-plugin || warn "docker-buildx-plugin not available from the enabled repos."
     sudo systemctl enable --now docker
 }
 
@@ -90,6 +93,26 @@ if ! docker info &>/dev/null; then
 else
     DOCKER="docker"
 fi
+
+# BuildKit (docker buildx). The 5.8 hardened Dockerfiles read ARG TARGETARCH,
+# which only BuildKit fills in; the legacy builder leaves it empty and the
+# database image build fails on a 404 for the PostgreSQL repo package.
+if ! $DOCKER buildx version &>/dev/null; then
+    warn "Docker buildx (BuildKit) not found. Installing..."
+    if command -v apt-get &>/dev/null; then
+        sudo apt-get install -y docker-buildx || sudo apt-get install -y docker-buildx-plugin || true
+    elif command -v dnf &>/dev/null; then
+        sudo dnf install -y docker-buildx-plugin || true
+    fi
+    if ! $DOCKER buildx version &>/dev/null; then
+        err "Docker buildx (BuildKit) is missing and could not be installed."
+        echo "  The TAK Server 5.8 images need it to detect the CPU type."
+        echo "  Ubuntu/Debian: sudo apt-get install docker-buildx"
+        echo "  RHEL/Rocky:    sudo dnf install docker-buildx-plugin (Docker's own repo)"
+        exit 1
+    fi
+fi
+log "Docker buildx: $($DOCKER buildx version | head -1)"
 
 # Required tools
 if command -v apt-get &>/dev/null; then
