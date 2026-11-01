@@ -262,6 +262,11 @@ log "Working directory: $(pwd)"
 # container fails with "permission denied". Make every script under tak/ executable (harmless for 5.6/5.7).
 if [ -d "tak" ]; then
     find tak -type f -name '*.sh' -exec chmod +x {} +
+    # The 5.8 hardened images run as non-root users in group 0 (tak:0 and postgres:0) and the bind mount hides the
+    # ownership the image set up. Unzipped as root, tak/ is root:root with no group write, so TAK Server stops at
+    # "tee: /opt/tak/logs/takserver.log: Permission denied" and "AccessDeniedException: TAKIgniteConfig.xml".
+    # Give group 0 write access (harmless for 5.6/5.7, whose containers run as root).
+    chmod -R g+rwX tak
 fi
 
 # Get version string from version.txt
