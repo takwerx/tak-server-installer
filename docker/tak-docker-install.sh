@@ -541,8 +541,13 @@ TAK_CONTAINER="takserver-${VERSION}"
 # Stop/remove old container if exists
 $DOCKER rm -f "$TAK_CONTAINER" 2>/dev/null || true
 
+# The 5.8 hardened image has a HEALTHCHECK (tak/health/takserver/health_check.sh) that logs in to 8443 with
+# /opt/tak/certs/files/$ADMIN_CERT_NAME.p12 using $ADMIN_CERT_PASS. Without these two variables it can never succeed and
+# `docker ps` shows "unhealthy" although the server works. The older images have no health check and ignore them.
 $DOCKER run -d \
     -v "$(pwd)/tak":/opt/tak:z \
+    -e ADMIN_CERT_NAME="$ADMIN_CERT" \
+    -e ADMIN_CERT_PASS="$CERT_PASS" \
     -it \
     -p 8089:8089 \
     -p 8443:8443 \
