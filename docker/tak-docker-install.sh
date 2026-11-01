@@ -427,6 +427,14 @@ if [ "$PERSIST_DB" = true ]; then
         chown "${DB_RUN_UID}:0" "$DB_DATA_DIR"
         chmod 700 "$DB_DATA_DIR"
         log "Database folder owned by uid ${DB_RUN_UID} (the user the database image runs as)"
+        # That image also runs initdb while it is built, and an empty bind-mounted folder hides the result
+        # ("pg_ctl: directory ... is not a database cluster directory"). Copy the image's cluster in on first use.
+        if [ -z "$(ls -A "$DB_DATA_DIR" 2>/dev/null)" ]; then
+            $DOCKER run --rm --entrypoint sh -v "${DB_DATA_DIR}":/seed:z takserver-db:"${VERSION}" \
+                -c 'cp -a /var/lib/postgresql/data/. /seed/' \
+                || { err "Could not initialise the database folder ${DB_DATA_DIR}"; exit 1; }
+            log "Database folder initialised from the image"
+        fi
     fi
 
     $DOCKER run -d \
