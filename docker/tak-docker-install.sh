@@ -474,7 +474,38 @@ if [ -z "$TAK_DOCKERFILE" ]; then
 fi
 
 log "Using Dockerfile: ${TAK_DOCKERFILE}"
-$DOCKER build -t takserver:"${VERSION}" -f "$TAK_DOCKERFILE" .
+
+# The 5.8 hardened Dockerfile blocks openssl updates (exclude=openssl*) and then runs a full "microdnf update" from the
+# live UBI 10 repo. Once the repo ships a curl that needs a newer openssl than its pinned Temurin base image carries,
+# that step fails with "Could not depsolve transaction" (seen Nov 1, 2026: base 17.0.19_10 has openssl-libs 3.5.5, the
+# repo wants >= 3.5.8). A newer Temurin 17 UBI 10 image of the same JDK line carries the newer openssl. The bundle's
+# Dockerfile is not edited: its own ARG BASE_DEPLOY_TAG is overridden with --build-arg, and only after its own tag failed.
+# Set TAK_BASE_DEPLOY_TAG to force a tag on the first try.
+FALLBACK_BASE_TAG="17.0.20.1_1-jdk-ubi10-minimal"
+BUILD_LOG=$(mktemp)
+BUILD_ARGS=()
+if [ -n "${TAK_BASE_DEPLOY_TAG:-}" ] && grep -Eq '^ARG[[:space:]]+BASE_DEPLOY_TAG' "$TAK_DOCKERFILE"; then
+    log "Using base image tag from TAK_BASE_DEPLOY_TAG: ${TAK_BASE_DEPLOY_TAG}"
+    BUILD_ARGS=(--build-arg "BASE_DEPLOY_TAG=${TAK_BASE_DEPLOY_TAG}")
+fi
+set -o pipefail   # so a failed build is not hidden by tee
+if ! $DOCKER build "${BUILD_ARGS[@]}" -t takserver:"${VERSION}" -f "$TAK_DOCKERFILE" . 2>&1 | tee "$BUILD_LOG"; then
+    set +o pipefail
+    if [ ${#BUILD_ARGS[@]} -eq 0 ] \
+        && grep -Eq '^ARG[[:space:]]+BASE_DEPLOY_TAG' "$TAK_DOCKERFILE" \
+        && grep -q 'Could not depsolve transaction' "$BUILD_LOG" \
+        && grep -q 'openssl' "$BUILD_LOG"; then
+        warn "The bundle's base image can no longer take the current UBI 10 updates (its openssl is older than the repo's curl needs)."
+        warn "Retrying once with a newer Temurin base image: ${FALLBACK_BASE_TAG} (same JDK 17). The bundle's own Dockerfile is unchanged."
+        $DOCKER build --build-arg "BASE_DEPLOY_TAG=${FALLBACK_BASE_TAG}" -t takserver:"${VERSION}" -f "$TAK_DOCKERFILE" . \
+            || { err "TAK Server image build failed again with ${FALLBACK_BASE_TAG}."; rm -f "$BUILD_LOG"; exit 1; }
+    else
+        rm -f "$BUILD_LOG"
+        exit 1
+    fi
+fi
+set +o pipefail
+rm -f "$BUILD_LOG"
 
 log "TAK Server image built"
 
