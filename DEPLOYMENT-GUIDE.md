@@ -3,7 +3,9 @@
 **Version:** 2.0  
 **Date:** January 2026  
 **Compatible with:** TAK Server 5.x series  
-**Operating Systems:** Rocky Linux 9, RHEL 9, Ubuntu 22.04 LTS
+**Operating Systems:** Ubuntu 22.04 LTS (plus Docker)
+
+> **Rocky Linux 9 / RHEL 9 are not supported by the scripts in this repo yet.** The `rocky-9/` folder and `Rocky_9_*` scripts that the Rocky/RHEL steps below refer to were never published here. Use the Ubuntu 22.04 steps or the Docker path. The Rocky/RHEL steps are kept as a plan for when those scripts are added.
 
 This guide covers the complete deployment of TAK Server across multiple Linux distributions, including installation, SSL/domain configuration, and comprehensive monitoring.
 

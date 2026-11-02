@@ -8,12 +8,12 @@ For complete documentation, see [DEPLOYMENT-GUIDE.md](DEPLOYMENT-GUIDE.md)
 
 ## Prerequisites
 
-- Fresh Rocky Linux 9, RHEL 9, or Ubuntu 22.04 VPS
+- Fresh Ubuntu 22.04 VPS (Rocky Linux 9 / RHEL 9 scripts are not in this repo yet)
 - 8GB+ RAM, 4+ CPU cores, 50GB+ storage
 - Root access OR user account with sudo privileges
 - TAK Server package from [TAK.gov](https://tak.gov)
 
-**Docker path (different artifact):** the official **`takserver-docker-*.zip`** — not the `.deb`/`.rpm`. See [DEPLOYMENT-GUIDE.md — Docker](DEPLOYMENT-GUIDE.md#docker-tak-server-using-official-docker-zip-optional) and the official [TAK Server Configuration Guide (PDF)](docs/TAK_Server_Configuration_Guide.pdf) **§6**.
+**Docker path (different artifact):** the official **`takserver-docker-*.zip`** — not the `.deb`. See [DEPLOYMENT-GUIDE.md — Docker](DEPLOYMENT-GUIDE.md#docker-tak-server-using-official-docker-zip-optional) and the official [TAK Server Configuration Guide (PDF)](docs/TAK_Server_Configuration_Guide.pdf) **§6**.
 
 ---
 
@@ -28,19 +28,11 @@ git clone https://github.com/takwerx/tak-server-installer.git
 cd ~/tak-server-installer/ubuntu-22.04
 ```
 
-**For Rocky Linux 9 / RHEL 9:**
-```bash
-git clone https://github.com/takwerx/tak-server-installer.git
-cd ~/tak-server-installer/rocky-9
-```
-
 **Upload your TAK Server installation file to the directory you're in:**
 - Ubuntu: Upload `takserver_X.X-RELEASEX_all.deb` to `~/tak-server-installer/ubuntu-22.04/`
-- Rocky/RHEL: Upload `takserver-X.X-RELEASEX.noarch.rpm` to `~/tak-server-installer/rocky-9/`
 
 **OPTIONAL - Upload signature verification files to the same directory:**
 - Ubuntu: `takserver-public-gpg.key` AND `deb_policy.pol`
-- Rocky/RHEL: `takserver-public-gpg.key`
 
 > **Important:** The TAK Server installation file, scripts, and optional verification files must all be in the same directory!
 
@@ -52,14 +44,6 @@ cd ~/tak-server-installer/ubuntu-22.04
 chmod +x Ubuntu_22.04_TAK_Server_install.sh
 chmod +x Ubuntu_22.04_Caddy_setup.sh
 chmod +x Ubuntu_22.04_TAK_Server_Hardening.sh
-```
-
-**For Rocky Linux 9 / RHEL 9:**
-```bash
-cd ~/tak-server-installer/rocky-9
-chmod +x Rocky_9_TAK_Server_install.sh
-chmod +x Rocky_9_Caddy_setup.sh
-chmod +x Rocky_9_TAK_Server_Hardening.sh
 ```
 
 ---
@@ -74,16 +58,6 @@ cd ~/tak-server-installer/ubuntu-22.04
 
 # Run the install script (make sure .deb file is in this directory)
 sudo ./Ubuntu_22.04_TAK_Server_install.sh
-```
-
-### Rocky Linux 9 / RHEL 9
-
-```bash
-# Change to the script directory
-cd ~/tak-server-installer/rocky-9
-
-# Run the install script (make sure .rpm file is in this directory)
-sudo ./Rocky_9_TAK_Server_install.sh
 ```
 
 **During install:**
@@ -135,16 +109,6 @@ cd ~/tak-server-installer/ubuntu-22.04
 sudo ./Ubuntu_22.04_Caddy_setup.sh
 ```
 
-### Rocky Linux 9 / RHEL 9
-
-```bash
-# Change to the script directory
-cd ~/tak-server-installer/rocky-9
-
-# Run Caddy setup
-sudo ./Rocky_9_Caddy_setup.sh
-```
-
 **During setup:**
 - Enter your domain name
 - Confirm domain name
@@ -167,16 +131,6 @@ cd ~/tak-server-installer/ubuntu-22.04
 
 # Run hardening script
 sudo ./Ubuntu_22.04_TAK_Server_Hardening.sh
-```
-
-### Rocky Linux 9 / RHEL 9
-
-```bash
-# Change to the script directory
-cd ~/tak-server-installer/rocky-9
-
-# Run hardening script
-sudo ./Rocky_9_TAK_Server_Hardening.sh
 ```
 
 **During hardening:**
