@@ -323,6 +323,15 @@ sed -i 's#^FROM postgres:15.1#FROM postgres:15-bookworm#' docker/Dockerfile.taks
 - Linux host with Docker (Ubuntu 22.04, Rocky Linux 9, Jetson Ubuntu, etc.)
 - Same rough VPS sizing as native installs (8GB+ RAM, 4+ cores, 50GB+ disk)
 - Place `takserver-docker-*.zip` in `~/tak-docker/` (or set `INSTALL_DIR` in the script)
+- Run the script as a normal user in the `docker` group with sudo rights. It asks for sudo only to set file ownership for the 5.8 hardened containers.
+
+### Raspberry Pi 5 / ARM64
+
+The Docker install runs on a Raspberry Pi 5 (64-bit Raspberry Pi OS / Debian 13, arm64). Use the 16 GB model if you can; 8 GB works but is tight, and the script warns below 8 GB. Boot from an NVMe SSD rather than an SD card, since PostgreSQL writes constantly.
+
+- The Pi 5 kernel uses 16K memory pages. The base images TAK Server builds on (Eclipse Temurin 17 on UBI 10, and PostgreSQL 15 with PostGIS) were checked on it and run fine, so no kernel change is needed.
+- Install Docker from Docker's own repo (`docker-ce`, `docker-buildx-plugin`) or Debian's (`docker.io`, `docker-buildx`). TAK Server 5.8 needs buildx so the build knows the CPU type.
+- If the 5.8 database image build stops on a 404 from `download.postgresql.org`, the Dockerfile asked for an `arm64` package path. The PostgreSQL repo names ARM `aarch64` (for example `EL-10-aarch64`), so change `arm64` to `aarch64` in that URL and re-run.
 
 ### Automated install (recommended)
 

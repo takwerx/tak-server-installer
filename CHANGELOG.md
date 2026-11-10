@@ -2,6 +2,17 @@
 
 What changed for people running these scripts. Newest first.
 
+## Unreleased
+
+### Fixed
+- Docker install as a normal user (not root): the script now uses sudo to give the 5.8 hardened containers ownership of `tak/` and the database folder. Before, it stopped at `chown: Operation not permitted`, and a later reinstall could overwrite an existing database.
+
+### Added
+- Docker install warns when the machine has less than 8 GB of RAM.
+
+### Docs
+- Raspberry Pi 5 / ARM64 notes for the Docker install.
+
 ## v1.0.0 (Mon Nov 2, 2026)
 
 First tagged release. It also includes the Docker fixes already on main: the TAK database is no longer reachable from outside the box, and 5.6/5.7 bundles build their database image again.

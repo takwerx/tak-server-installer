@@ -23,6 +23,16 @@ warn() { echo -e "${YEL}[!]${NC} $1"; }
 err()  { echo -e "${RED}[ERROR]${NC} $1"; }
 step() { echo -e "\n${CYN}=== STEP $1 ===${NC}"; }
 
+# Run a command as root: directly when the script already runs as root, through sudo otherwise.
+# Needed for ownership changes (chown/chgrp to another user or group), which a normal user cannot make.
+as_root() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
+
 echo ""
 echo "============================================="
 echo "  TAK Server Docker Install"
@@ -85,6 +95,14 @@ if ! command -v docker &>/dev/null; then
     exit 1
 fi
 log "Docker: $(docker --version)"
+
+# Memory. TAK Server runs several JVMs (config, messaging, API, retention, plugins) next to PostgreSQL.
+# An 8 GB Raspberry Pi 5 works but is tight; below 8 GB the server usually runs out of memory.
+MEM_KB=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+if [ "${MEM_KB:-0}" -gt 0 ] && [ "$MEM_KB" -lt 7500000 ]; then
+    warn "Only $((MEM_KB / 1024)) MB of RAM. TAK Server needs 8 GB or more and may fail to start or be killed for lack of memory."
+fi
+log "Architecture: $(uname -m), RAM: $((MEM_KB / 1024)) MB"
 
 # Check we can run docker without sudo
 if ! docker info &>/dev/null; then
@@ -267,6 +285,12 @@ if [ -d "tak" ]; then
     # "tee: /opt/tak/logs/takserver.log: Permission denied" and "AccessDeniedException: TAKIgniteConfig.xml".
     # Give group 0 write access (harmless for 5.6/5.7, whose containers run as root).
     chmod -R g+rwX tak
+    # Unzipped by a normal user, tak/ belongs to that user's own group, not group 0, so the write access above
+    # would not reach the containers. Hand the group to 0 (needs root); the files stay owned by this user.
+    if [ "$(id -u)" -ne 0 ]; then
+        log "Setting group 0 on tak/ so the containers can write to it (sudo)..."
+        as_root chgrp -R 0 tak
+    fi
 fi
 
 # Get version string from version.txt
@@ -424,12 +448,14 @@ if [ "$PERSIST_DB" = true ]; then
     # Hand the folder to whatever user the image runs as; 5.6/5.7 images run as root and are left alone.
     DB_RUN_UID=$($DOCKER run --rm --entrypoint id takserver-db:"${VERSION}" -u 2>/dev/null | tr -d '[:space:]' || true)
     if [[ "$DB_RUN_UID" =~ ^[0-9]+$ ]] && [ "$DB_RUN_UID" != "0" ]; then
-        chown "${DB_RUN_UID}:0" "$DB_DATA_DIR"
-        chmod 700 "$DB_DATA_DIR"
+        as_root chown "${DB_RUN_UID}:0" "$DB_DATA_DIR"
+        as_root chmod 700 "$DB_DATA_DIR"
         log "Database folder owned by uid ${DB_RUN_UID} (the user the database image runs as)"
         # That image also runs initdb while it is built, and an empty bind-mounted folder hides the result
         # ("pg_ctl: directory ... is not a database cluster directory"). Copy the image's cluster in on first use.
-        if [ -z "$(ls -A "$DB_DATA_DIR" 2>/dev/null)" ]; then
+        # The folder is now mode 700 for another uid, so a normal user cannot list it: look as root, or an
+        # existing database would read as empty and be overwritten.
+        if [ -z "$(as_root ls -A "$DB_DATA_DIR" 2>/dev/null)" ]; then
             $DOCKER run --rm --entrypoint sh -v "${DB_DATA_DIR}":/seed:z takserver-db:"${VERSION}" \
                 -c 'cp -a /var/lib/postgresql/data/. /seed/' \
                 || { err "Could not initialise the database folder ${DB_DATA_DIR}"; exit 1; }
