@@ -180,17 +180,36 @@ step "1: Locate TAK Server Docker ZIP"
 
 mkdir -p "$INSTALL_DIR"
 
-# Find all takserver docker ZIPs in the install dir
+# Pick the ZIP: the first argument, else $TAK_ZIP, else whatever is in ${INSTALL_DIR}.
+#   ./tak-docker-install.sh /path/to/takserver-docker-5.8-RELEASE-92.zip
+#   TAK_ZIP=/path/to/takserver-docker-hardened-5.8-RELEASE-92.zip ./tak-docker-install.sh
+TAK_ZIP="${1:-${TAK_ZIP:-}}"
 ZIPS=()
-while IFS= read -r f; do
-    ZIPS+=("$f")
-done < <(ls "${INSTALL_DIR}"/takserver-docker-*.zip 2>/dev/null)
+if [ -n "$TAK_ZIP" ]; then
+    if [ ! -f "$TAK_ZIP" ]; then
+        err "ZIP not found: ${TAK_ZIP}"
+        exit 1
+    fi
+    case "$(basename "$TAK_ZIP")" in
+        takserver-docker-*.zip) ;;
+        *) err "$(basename "$TAK_ZIP") is not a TAK Server Docker ZIP (expected takserver-docker-*.zip or takserver-docker-hardened-*.zip)."
+           exit 1 ;;
+    esac
+    TAK_ZIP=$(realpath "$TAK_ZIP")
+    ZIPS=("$TAK_ZIP")
+else
+    # Find all takserver docker ZIPs in the install dir
+    while IFS= read -r f; do
+        ZIPS+=("$f")
+    done < <(ls "${INSTALL_DIR}"/takserver-docker-*.zip 2>/dev/null)
+fi
 
 if [ ${#ZIPS[@]} -eq 0 ]; then
     err "No takserver-docker-*.zip found in ${INSTALL_DIR}"
     echo ""
     echo "  Download any TAK Server Docker release from https://tak.gov"
     echo "  and place the ZIP in: ${INSTALL_DIR}/"
+    echo "  or pass its path:     $0 /path/to/takserver-docker-<version>.zip"
     echo ""
     echo "  Examples:"
     echo "    takserver-docker-5.6-RELEASE-57.zip"
@@ -212,7 +231,10 @@ else
     TAK_ZIP="${ZIPS[$ZIP_SEL]}"
 fi
 
-log "Using: $(basename "$TAK_ZIP")"
+case "$(basename "$TAK_ZIP")" in
+    takserver-docker-hardened-*) log "Using: $(basename "$TAK_ZIP") (hardened: UBI 10 base, FIPS, non-root containers, health checks)" ;;
+    *)                           log "Using: $(basename "$TAK_ZIP") (standard)" ;;
+esac
 
 #----------------------------------------------------------------------
 # 2. Network interface selection
@@ -260,7 +282,12 @@ log "Extracting $(basename "$TAK_ZIP")..."
 unzip -o "$TAK_ZIP"
 
 # Find extracted dir - could be takserver-docker-X.X-RELEASE-XX or similar
-TAK_DIR=$(find . -maxdepth 1 -type d -name 'takserver-docker*' -print 2>/dev/null | sort -r | head -1)
+# Use the top-level folder named inside this ZIP, so another bundle extracted here earlier
+# (standard next to hardened, or an older release) is never picked by mistake.
+TAK_DIR=$(unzip -Z1 "$TAK_ZIP" 2>/dev/null | head -1 | cut -d/ -f1)
+if [ -z "$TAK_DIR" ] || [ ! -d "$TAK_DIR/tak" ]; then
+    TAK_DIR=$(find . -maxdepth 1 -type d -name 'takserver-docker*' -print 2>/dev/null | sort -r | head -1)
+fi
 if [ -z "$TAK_DIR" ]; then
     # Some ZIPs extract without a top-level directory
     if [ -d "tak" ]; then

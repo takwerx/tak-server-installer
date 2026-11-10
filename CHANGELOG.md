@@ -7,9 +7,11 @@ What changed for people running these scripts. Newest first.
 ### Fixed
 - Docker install as a normal user (not root): the script now uses sudo to give the 5.8 hardened containers ownership of `tak/` and the database folder. Before, it stopped at `chown: Operation not permitted`, and a later reinstall could overwrite an existing database.
 - Docker install of TAK Server 5.8: the cert folder now keeps group 0 after the installer hands it to the host user, so the container (uid 1001) can still make new client certs there.
+- Docker install: with more than one bundle extracted in `~/tak-docker`, it used whichever folder sorted last (hardened over standard) instead of the ZIP you picked.
 
 ### Added
 - Docker install warns when the machine has less than 8 GB of RAM.
+- Docker install takes the ZIP's path as an argument (or `TAK_ZIP=`), so it can be kept anywhere, and says whether it is a standard or hardened bundle.
 
 ### Docs
 - Raspberry Pi 5 / ARM64 notes for the Docker install.

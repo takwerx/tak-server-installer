@@ -351,6 +351,28 @@ The script:
 
 Edit variables at the top of `docker/tak-docker-install.sh` (CA name, org fields, cert password, etc.) before running.
 
+To use a ZIP that is not in `~/tak-docker/`, or to choose between several, pass its path (or set `TAK_ZIP`):
+
+```bash
+~/tak-server-installer/docker/tak-docker-install.sh /path/to/takserver-docker-5.8-RELEASE-92.zip
+TAK_ZIP=/path/to/takserver-docker-hardened-5.8-RELEASE-92.zip ~/tak-server-installer/docker/tak-docker-install.sh
+```
+
+### Standard or hardened bundle
+
+TAK.gov publishes two Docker bundles per release; the script installs either one.
+
+| | Standard (`takserver-docker-<ver>.zip`) | Hardened (`takserver-docker-hardened-<ver>.zip`) |
+|---|---|---|
+| Base images | Public `postgres` and `eclipse-temurin` images | Red Hat UBI 10 with DISA STIG fixes applied at build time |
+| Crypto | Default Java/OpenSSL | FIPS mode on, ChaCha20 ciphers disabled |
+| Runs as | root | non-root (`tak` uid 1001, `postgres`, both in group 0) |
+| Health checks | none | `docker ps` shows healthy/unhealthy; also checks critical files' checksums |
+| Database | PostgreSQL 15 | PostgreSQL 18 (5.8) |
+| Build time | shorter | longer (full OS update plus hardening scripts) |
+
+Pick hardened if you need STIG/FIPS compliance or want the health checks. For a home lab or a Raspberry Pi, standard is fine. Data does not move between the two automatically, because the database versions differ (see the PostgreSQL upgrade notes in the bundle's `docker/README_hardened_docker.md`).
+
 ### Compose (optional)
 
 After the ZIP is extracted and **both images are built** (`takserver-db:${VERSION}` and `takserver:${VERSION}`), you can run the stack with Compose from the **extracted** directory (where `tak/` and `docker/` exist):
