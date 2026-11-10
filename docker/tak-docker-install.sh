@@ -8,9 +8,33 @@
 # Uses the official takserver-docker-*.zip from https://tak.gov — not the .deb/.rpm.
 # After images exist, you can run stacks with this script (docker run) or
 # docker/docker-compose.yml (docker compose).
+#
+# Usage:
+#   ./tak-docker-install.sh /path/to/takserver-docker[-hardened]-<version>.zip
+# With no argument it uses $TAK_ZIP, then any takserver-docker-*.zip in INSTALL_DIR.
 #==========================================================================
 
 set -e
+
+usage() {
+    cat <<USAGE
+Usage: $(basename "$0") /path/to/takserver-docker-<version>.zip
+
+  Installs TAK Server in Docker from the official TAK.gov Docker ZIP, standard
+  (takserver-docker-<version>.zip) or hardened (takserver-docker-hardened-<version>.zip).
+  The ZIP can be anywhere; it is extracted into ~/tak-docker (INSTALL_DIR in the script).
+
+  Without an argument: uses \$TAK_ZIP if set, otherwise any takserver-docker-*.zip
+  already in ~/tak-docker (asks which one if there are several).
+
+Example:
+  $(basename "$0") ~/Downloads/takserver-docker-hardened-5.8-RELEASE-92.zip
+USAGE
+}
+case "${1:-}" in
+    -h|--help) usage; exit 0 ;;
+    -*) usage >&2; exit 1 ;;
+esac
 
 RED='\033[0;31m'
 GRN='\033[0;32m'

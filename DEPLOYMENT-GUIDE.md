@@ -322,7 +322,7 @@ sed -i 's#^FROM postgres:15.1#FROM postgres:15-bookworm#' docker/Dockerfile.taks
 
 - Linux host with Docker (Ubuntu 22.04, Rocky Linux 9, Jetson Ubuntu, etc.)
 - Same rough VPS sizing as native installs (8GB+ RAM, 4+ cores, 50GB+ disk)
-- Place `takserver-docker-*.zip` in `~/tak-docker/` (or set `INSTALL_DIR` in the script)
+- The `takserver-docker-*.zip` (or `takserver-docker-hardened-*.zip`) from TAK.gov, anywhere on the host; you pass its path to the script. It is extracted into `~/tak-docker/` (set `INSTALL_DIR` in the script to change that).
 - Run the script as a normal user in the `docker` group with sudo rights. It asks for sudo only to set file ownership for the 5.8 hardened containers.
 
 ### Raspberry Pi 5 / ARM64
@@ -339,24 +339,18 @@ From this repository:
 
 ```bash
 git clone https://github.com/takwerx/tak-server-installer.git
-# Copy the Docker ZIP into ~/tak-docker/ (see script header for INSTALL_DIR)
-cp /path/to/takserver-docker-5.x-RELEASE-x.zip ~/tak-docker/
 chmod +x ~/tak-server-installer/docker/tak-docker-install.sh
-~/tak-server-installer/docker/tak-docker-install.sh
+# Pass the path to the Docker ZIP you downloaded from TAK.gov (standard or hardened):
+~/tak-server-installer/docker/tak-docker-install.sh /path/to/takserver-docker-hardened-5.8-RELEASE-92.zip
 ```
 
 The script:
 
 1. Installs Docker if missing (apt or dnf), configures `CoreConfig.xml` and `cert-metadata.sh`, builds `takserver-db` and `takserver` images, runs containers, generates certificates, and promotes the admin client.
 
-Edit variables at the top of `docker/tak-docker-install.sh` (CA name, org fields, cert password, etc.) before running.
+Edit variables at the top of `docker/tak-docker-install.sh` (CA name, org fields, cert password, etc.) before running. `--help` prints the usage.
 
-To use a ZIP that is not in `~/tak-docker/`, or to choose between several, pass its path (or set `TAK_ZIP`):
-
-```bash
-~/tak-server-installer/docker/tak-docker-install.sh /path/to/takserver-docker-5.8-RELEASE-92.zip
-TAK_ZIP=/path/to/takserver-docker-hardened-5.8-RELEASE-92.zip ~/tak-server-installer/docker/tak-docker-install.sh
-```
+Without a path, the script uses `TAK_ZIP` if set, otherwise any `takserver-docker-*.zip` already in `~/tak-docker/` (and asks which one if there are several).
 
 ### Standard or hardened bundle
 

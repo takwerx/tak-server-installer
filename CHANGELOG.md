@@ -11,7 +11,7 @@ What changed for people running these scripts. Newest first.
 
 ### Added
 - Docker install warns when the machine has less than 8 GB of RAM.
-- Docker install takes the ZIP's path as an argument (or `TAK_ZIP=`), so it can be kept anywhere, and says whether it is a standard or hardened bundle.
+- Docker install takes the ZIP's path as its argument, so it can be kept anywhere (`--help` shows usage), and says whether it is a standard or hardened bundle. Putting it in `~/tak-docker/` still works.
 
 ### Docs
 - Raspberry Pi 5 / ARM64 notes for the Docker install.
