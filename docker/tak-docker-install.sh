@@ -655,6 +655,35 @@ fi
 
 log "Both containers running"
 
+# The 5.8 hardened health checks also checksum a list of files (tak/health/<name>/critical_file_list.txt) and fail
+# when one is missing. That list names /usr/share/crypto-policies/back-ends/*/openssl.config, which the current
+# UBI 10 crypto-policies package no longer ships, so both containers stay "unhealthy" although they work.
+# Drop entries that do not exist inside the container; the rest are still checked. Older bundles have no list.
+prune_health_list() {
+    local container="$1" list="tak/health/$2/critical_file_list.txt" kept removed=0 line
+    [ -f "$list" ] || return 0
+    kept=$(mktemp)
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            ''|'#'*) echo "$line" >> "$kept"; continue ;;
+        esac
+        if $DOCKER exec "$container" test -e "$line" 2>/dev/null; then
+            echo "$line" >> "$kept"
+        else
+            removed=$((removed + 1))
+        fi
+    done < "$list"
+    if [ "$removed" -gt 0 ]; then
+        cp "$list" "${list}.orig"
+        cat "$kept" > "$list"
+        rm -f "tak/health/$2/critical_file_checksums.txt"
+        warn "Health check: removed ${removed} file(s) missing from ${container} from $list (original kept as ${list}.orig)"
+    fi
+    rm -f "$kept"
+}
+prune_health_list "$DB_CONTAINER" takserver-db
+prune_health_list "$TAK_CONTAINER" takserver
+
 #----------------------------------------------------------------------
 # 11. Generate Certificates
 #----------------------------------------------------------------------
@@ -672,9 +701,11 @@ log "Generating admin certificate: ${ADMIN_CERT}"
 $DOCKER exec -it "$TAK_CONTAINER" bash -c \
     "cd /opt/tak/certs && ./makeCert.sh client ${ADMIN_CERT}"
 
+# Restart the container rather than running configureInDocker.sh again with docker exec: the image's entrypoint
+# already runs it, so a second copy starts beside the first and fails with "Port 8443 was already in use"
+# (seen with 5.8). A container restart stops every TAK process and starts one clean set with the new certs.
 log "Restarting TAK Server to load certificates..."
-$DOCKER exec -d "$TAK_CONTAINER" bash -c \
-    "cd /opt/tak/ && ./configureInDocker.sh"
+$DOCKER restart "$TAK_CONTAINER" >/dev/null
 
 log "Waiting 45s for TAK Server to restart with certs..."
 sleep 45
@@ -756,7 +787,7 @@ echo "    DB Logs: docker logs -f ${DB_CONTAINER}"
 echo "    Stop:    docker stop ${TAK_CONTAINER} ${DB_CONTAINER}"
 echo "    Start:   docker start ${DB_CONTAINER} ${TAK_CONTAINER}"
 echo "    Shell:   docker exec -it ${TAK_CONTAINER} bash"
-echo "    Restart: docker exec -d ${TAK_CONTAINER} bash -c 'cd /opt/tak && ./configureInDocker.sh'"
+echo "    Restart: docker restart ${TAK_CONTAINER}"
 echo ""
 echo "  Optional Compose (from repo clone, after images are built):"
 echo "    export VERSION=\"${VERSION}\""

@@ -7,6 +7,8 @@ What changed for people running these scripts. Newest first.
 ### Fixed
 - Docker install as a normal user (not root): the script now uses sudo to give the 5.8 hardened containers ownership of `tak/` and the database folder. Before, it stopped at `chown: Operation not permitted`, and a later reinstall could overwrite an existing database.
 - Docker install of TAK Server 5.8: the cert folder now keeps group 0 after the installer hands it to the host user, so the container (uid 1001) can still make new client certs there.
+- Docker install of TAK Server 5.8: both containers stayed "unhealthy" because the health check's file list names `crypto-policies/.../openssl.config` files that current UBI 10 no longer ships. The installer now drops list entries missing from the container (original kept as `critical_file_list.txt.orig`).
+- Docker install: after making the certs, TAK Server is restarted with `docker restart`. Running `configureInDocker.sh` again started a second copy beside the one the image already runs, which failed with "Port 8443 was already in use".
 - Docker install: with more than one bundle extracted in `~/tak-docker`, it used whichever folder sorted last (hardened over standard) instead of the ZIP you picked.
 
 ### Added
