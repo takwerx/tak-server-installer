@@ -96,6 +96,8 @@ tak-server-installer/
 ├── docker/
 │   ├── tak-docker-install.sh   # Install from takserver-docker-*.zip
 │   └── docker-compose.yml      # Optional stack after images are built
+├── takx/
+│   └── install-takx.sh         # Install TAKX headless, incl. arm64 (system JDK 17)
 ├── docs/
 │   ├── guard-dogs.md           # Guard Dog monitoring explained
 │   └── PLATFORM_REFERENCE.md   # Outside services this repo depends on

@@ -14,6 +14,7 @@ What changed for people running these scripts. Newest first.
 ### Added
 - Docker install warns when the machine has less than 8 GB of RAM.
 - Docker install takes the ZIP's path as its argument, so it can be kept anywhere (`--help` shows usage), and says whether it is a standard or hardened bundle. Putting it in `~/tak-docker/` still works.
+- `takx/install-takx.sh`: installs TAKX from its install4j installer, unattended, on arm64 as well as x86-64 (uses a system JDK 17 instead of the bundled x64 one). See `takx/README.md`.
 
 ### Docs
 - Raspberry Pi 5 / ARM64 notes for the Docker install.
