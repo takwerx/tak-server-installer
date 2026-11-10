@@ -6,6 +6,7 @@ What changed for people running these scripts. Newest first.
 
 ### Fixed
 - Docker install as a normal user (not root): the script now uses sudo to give the 5.8 hardened containers ownership of `tak/` and the database folder. Before, it stopped at `chown: Operation not permitted`, and a later reinstall could overwrite an existing database.
+- Docker install of TAK Server 5.8: the cert folder now keeps group 0 after the installer hands it to the host user, so the container (uid 1001) can still make new client certs there.
 
 ### Added
 - Docker install warns when the machine has less than 8 GB of RAM.

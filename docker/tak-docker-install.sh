@@ -644,10 +644,15 @@ log "Admin certificate authorized"
 #----------------------------------------------------------------------
 step "13: Fix File Permissions"
 
+# Hand the cert files to the host user so they can be copied off the box, but keep group 0: the 5.8 hardened
+# container runs as tak (uid 1001) in group 0 and must still write here to make more certs (makeCert.sh).
+# Group write goes on the folder only, so the private keys keep the owner-only mode makeCert.sh gives them.
+CERT_UID=$(id -u)
+[ "$CERT_UID" -eq 0 ] && CERT_UID=1000
 $DOCKER exec -u root "$TAK_CONTAINER" bash -c \
-    "chown -R 1000:1000 /opt/tak/certs/files/"
+    "chown -R ${CERT_UID}:0 /opt/tak/certs/files/ && chmod g+rwx /opt/tak/certs/files/"
 
-log "File permissions fixed (1000:1000)"
+log "File permissions fixed (${CERT_UID}:0)"
 
 #----------------------------------------------------------------------
 # 14. Verify

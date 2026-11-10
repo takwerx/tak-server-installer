@@ -329,9 +329,9 @@ sed -i 's#^FROM postgres:15.1#FROM postgres:15-bookworm#' docker/Dockerfile.taks
 
 The Docker install runs on a Raspberry Pi 5 (64-bit Raspberry Pi OS / Debian 13, arm64). Use the 16 GB model if you can; 8 GB works but is tight, and the script warns below 8 GB. Boot from an NVMe SSD rather than an SD card, since PostgreSQL writes constantly.
 
-- The Pi 5 kernel uses 16K memory pages. The base images TAK Server builds on (Eclipse Temurin 17 on UBI 10, and PostgreSQL 15 with PostGIS) were checked on it and run fine, so no kernel change is needed.
-- Install Docker from Docker's own repo (`docker-ce`, `docker-buildx-plugin`) or Debian's (`docker.io`, `docker-buildx`). TAK Server 5.8 needs buildx so the build knows the CPU type.
-- If the 5.8 database image build stops on a 404 from `download.postgresql.org`, the Dockerfile asked for an `arm64` package path. The PostgreSQL repo names ARM `aarch64` (for example `EL-10-aarch64`), so change `arm64` to `aarch64` in that URL and re-run.
+- Use the Docker bundle, for example `takserver-docker-hardened-5.8-RELEASE-92.zip`. Not the `.deb`/`.rpm`, and not `takserver-fedhub-docker-*.zip` (that is Federation Hub).
+- The Pi 5 kernel uses 16K memory pages. Eclipse Temurin 17 on UBI 10 (the TAK Server image base) was checked on it and runs fine, so no kernel change is needed.
+- Install Docker from Docker's own repo (`docker-ce`, `docker-buildx-plugin`) or Debian's (`docker.io`, `docker-buildx`). TAK Server 5.8 needs buildx: its database Dockerfile turns BuildKit's `TARGETARCH=arm64` into `aarch64` to download PostgreSQL 18 and PostGIS 3.6, and both are published for `aarch64`.
 
 ### Automated install (recommended)
 
