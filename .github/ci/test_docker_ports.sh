@@ -54,6 +54,22 @@ else fail "install script: FEDERATION_PORTS must default to false"; fi
 if grep -qE '^    FED_BIND="127\.0\.0\.1"$' "$INSTALL"; then ok "install script: federation ports bind to loopback when off"; \
 else fail "install script: FED_BIND must be 127.0.0.1 when federation is off"; fi
 
+# --- install script: finds the firewall helper however it is started (ops #641: run as ./docker/tak-docker-install.sh,
+# the script had already changed folder when it looked, so the helper was never found and the rules were never installed)
+dir_line=$(grep -m1 -E '^SCRIPT_DIR=' "$INSTALL")
+first_cd=$(grep -n -m1 -E '^[[:space:]]*cd ' "$INSTALL" | cut -d: -f1)
+dir_at=$(grep -n -m1 -E '^SCRIPT_DIR=' "$INSTALL" | cut -d: -f1)
+if [ -n "$dir_line" ] && [ "${dir_at:-999999}" -lt "${first_cd:-0}" ]; then ok "install script: finds its own folder before the first cd"; \
+else fail "install script: SCRIPT_DIR must be set before the script changes folder"; fi
+if grep -qE '^FW_SCRIPT="\$\{SCRIPT_DIR\}/tak-docker-firewall\.sh"$' "$INSTALL"; then ok "install script: looks for the firewall helper beside itself"; \
+else fail "install script: FW_SCRIPT must be \${SCRIPT_DIR}/tak-docker-firewall.sh"; fi
+work=$(mktemp -d)
+printf '#!/bin/bash\n%s\ncd /\necho "$SCRIPT_DIR"\n' "$dir_line" > "$work/probe.sh"
+found=$(cd "$work" && bash ./probe.sh 2>&1)
+if [ "$found" = "$work" ] || [ "$found" = "$(cd "$work" && pwd -P)" ]; then ok "install script: the SCRIPT_DIR line gives the right folder for a relative start"; \
+else fail "install script: SCRIPT_DIR is '$found' when started as ./probe.sh in $work"; fi
+rm -rf "$work"
+
 # --- firewall helper: dry run
 out=$(bash "$FW" print 8089 8443 8446 2>&1); rc=$?
 allowed=$(printf '%s\n' "$out" | sed -nE 's/.*--ctorigdstport ([0-9]+) -j RETURN$/\1/p' | tr '\n' ' ')
