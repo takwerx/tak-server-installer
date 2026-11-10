@@ -35,13 +35,16 @@ services:
         condition: service_healthy
     volumes:
       - ./tak:/opt/tak:z
+    # 8089 (clients), 8443 (admin, needs a client certificate) and 8446 (enrollment) are open on every interface.
+    # 8444 and 9000/9001 are federation ports: loopback only unless you set TAK_FED_BIND=0.0.0.0
+    # (then also allow them in the firewall step, see docker/tak-docker-firewall.sh).
     ports:
       - "8089:8089"
       - "8443:8443"
-      - "8444:8444"
       - "8446:8446"
-      - "9000:9000"
-      - "9001:9001"
+      - "${TAK_FED_BIND:-127.0.0.1}:8444:8444"
+      - "${TAK_FED_BIND:-127.0.0.1}:9000:9000"
+      - "${TAK_FED_BIND:-127.0.0.1}:9001:9001"
     restart: unless-stopped
     networks:
       - tak-net
