@@ -12,6 +12,10 @@
 
 set -e
 
+# Where this script lives, found before the first cd: the README runs it as ./docker/tak-docker-install.sh,
+# and a relative $0 no longer points at the script once it has changed into the install folder.
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+
 RED='\033[0;31m'
 GRN='\033[0;32m'
 YEL='\033[1;33m'
@@ -573,7 +577,7 @@ $DOCKER run -d \
 log "TAK Server container started: ${TAK_CONTAINER}"
 
 # Second line of defence: only the ports above may take new connections from outside, however Docker publishes them.
-FW_SCRIPT="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)/tak-docker-firewall.sh"
+FW_SCRIPT="${SCRIPT_DIR}/tak-docker-firewall.sh"
 FW_OK=false
 if [ -f "$FW_SCRIPT" ] && command -v iptables &>/dev/null; then
     if sudo bash "$FW_SCRIPT" persist "${OPEN_PORTS[@]}"; then
