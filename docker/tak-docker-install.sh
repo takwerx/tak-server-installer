@@ -12,6 +12,10 @@
 
 set -e
 
+# Where this script lives, found before the first cd: the README runs it as ./docker/tak-docker-install.sh,
+# and a relative $0 no longer points at the script once it has changed into the install folder.
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+
 RED='\033[0;31m'
 GRN='\033[0;32m'
 YEL='\033[1;33m'
@@ -37,6 +41,7 @@ CA_NAME="Yankee1"
 ADMIN_CERT="admin"
 CERT_PASS="atakatak"                       # default TAK cert password
 INSTALL_DIR="${HOME}/tak-docker"           # working directory
+FEDERATION_PORTS=false                     # true = open the federation ports 8444, 9000, 9001 to the network (most servers never use them)
 PERSIST_DB=true                            # true = mount ${INSTALL_DIR}/tak-db-data (hardened images keep the DB there; standard images keep it inside the container)
 # Standard 5.6/5.7 bundles build the DB image FROM postgres:15.1 (Debian bullseye),
 # whose PostgreSQL apt repo is retired, so that build fails. The installer swaps
@@ -544,6 +549,16 @@ $DOCKER rm -f "$TAK_CONTAINER" 2>/dev/null || true
 # The 5.8 hardened image has a HEALTHCHECK (tak/health/takserver/health_check.sh) that logs in to 8443 with
 # /opt/tak/certs/files/$ADMIN_CERT_NAME.p12 using $ADMIN_CERT_PASS. Without these two variables it can never succeed and
 # `docker ps` shows "unhealthy" although the server works. The older images have no health check and ignore them.
+#
+# Published ports: 8089, 8443 and 8446 are what clients and admins use. Docker skips ufw/firewalld for published ports,
+# so everything else is published on loopback only, and tak-docker-firewall.sh (below) drops the rest.
+if [ "$FEDERATION_PORTS" = true ]; then
+    FED_BIND="0.0.0.0"
+    OPEN_PORTS=(8089 8443 8446 8444 9000 9001)
+else
+    FED_BIND="127.0.0.1"
+    OPEN_PORTS=(8089 8443 8446)
+fi
 $DOCKER run -d \
     -v "$(pwd)/tak":/opt/tak:z \
     -e ADMIN_CERT_NAME="$ADMIN_CERT" \
@@ -551,15 +566,30 @@ $DOCKER run -d \
     -it \
     -p 8089:8089 \
     -p 8443:8443 \
-    -p 8444:8444 \
     -p 8446:8446 \
-    -p 9000:9000 \
-    -p 9001:9001 \
+    -p "${FED_BIND}:8444:8444" \
+    -p "${FED_BIND}:9000:9000" \
+    -p "${FED_BIND}:9001:9001" \
     --network "$NETWORK_NAME" \
     --name "$TAK_CONTAINER" \
     takserver:"${VERSION}"
 
 log "TAK Server container started: ${TAK_CONTAINER}"
+
+# Second line of defence: only the ports above may take new connections from outside, however Docker publishes them.
+FW_SCRIPT="${SCRIPT_DIR}/tak-docker-firewall.sh"
+FW_OK=false
+if [ -f "$FW_SCRIPT" ] && command -v iptables &>/dev/null; then
+    if sudo bash "$FW_SCRIPT" persist "${OPEN_PORTS[@]}"; then
+        FW_OK=true
+        log "Firewall rules for published ports installed (open: ${OPEN_PORTS[*]})"
+    fi
+fi
+if [ "$FW_OK" != true ]; then
+    warn "Could not install the firewall rules for published ports (need iptables, systemd and ${FW_SCRIPT})."
+    warn "The optional ports are still bound to this machine only. Re-run later: sudo bash ${FW_SCRIPT} persist ${OPEN_PORTS[*]}"
+fi
+
 log "Waiting 30s for TAK Server to initialize..."
 sleep 30
 
@@ -652,8 +682,19 @@ echo ""
 echo -e "  Admin Web UI:  ${YEL}https://${SERVER_IP}:8443${NC}"
 echo -e "  Setup Wizard:  ${YEL}https://${SERVER_IP}:8443/setup/${NC}"
 echo -e "  TLS Input:     ${YEL}Port 8089${NC}"
-echo -e "  Fed v1:        ${YEL}Port 9000${NC}"
-echo -e "  Fed v2:        ${YEL}Port 9001${NC}"
+echo ""
+echo "  Open to the network: ${OPEN_PORTS[*]}"
+if [ "$FEDERATION_PORTS" = true ]; then
+    echo "    (8444, 9000 and 9001 are federation ports, open because FEDERATION_PORTS=true)"
+else
+    echo "  Federation ports 8444, 9000 and 9001: this machine only."
+    echo "    To use federation, set FEDERATION_PORTS=true at the top of this script and run it again."
+fi
+if [ "$FW_OK" = true ]; then
+    echo "  Docker bypasses ufw, so a rule set (tak-docker-firewall.service) drops new connections to any other published port."
+else
+    echo -e "  ${YEL}The Docker firewall rules were NOT installed (see the warning above).${NC}"
+fi
 echo ""
 echo -e "  ${RED}--- CREDENTIALS (SAVE THESE) ---${NC}"
 echo -e "  DB Password:   ${YEL}${DB_PASS}${NC}"
