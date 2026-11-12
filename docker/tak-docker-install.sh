@@ -38,6 +38,7 @@ echo ""
 # Configuration - edit these before running
 #----------------------------------------------------------------------
 CA_NAME="Yankee1"
+INTERMEDIATE_CA_NAME="${CA_NAME}-Intermediate"   # signs the server and client certificates, and the certificates ATAK users enroll for on 8446
 ADMIN_CERT="admin"
 CERT_PASS="atakatak"                       # default TAK cert password
 INSTALL_DIR="${HOME}/tak-docker"           # working directory
@@ -309,6 +310,24 @@ sed -i "s|password=\"YourPasswordHere\"|password=\"${DB_PASS}\"|g" tak/CoreConfi
 
 log "Database password set: ${DB_PASS}"
 log "CoreConfig.xml ready"
+
+# Certificate enrollment on 8446 (ops #703). Without a <certificateSigning> block in CoreConfig.xml, 8446 answers
+# /Marti/api/tls/config with HTTP 500 ("CertificateSigning element not found in CoreConfig!") and an ATAK user who types the
+# server address, a username and a password gets no certificate. The 5.8 CoreConfig.example.xml only holds the block as a comment
+# (and has no <vbm/> line to hang it on, unlike the .deb), so the block is added before </Configuration>; the elements of
+# <Configuration> can be in any order. Also points the truststore at the intermediate CA's, which trusts the root and the
+# intermediate, so the certificates the intermediate signs are accepted on 8089.
+# BEGIN enable_enrollment (the CI check .github/ci/test_docker_enrollment.sh runs exactly this function)
+enable_enrollment() {
+    local cfg="$1" ica="$2" org="$3" ou="$4"
+    [ -f "$cfg" ] || { err "enable_enrollment: no $cfg"; return 1; }
+    if ! grep -q 'tak-server-installer: certificate enrollment' "$cfg"; then
+        # keystorePass is the password makeCert.sh gives the signing keystore (CAPASS, default atakatak)
+        sed -i "s|</Configuration>|<!-- tak-server-installer: certificate enrollment (8446) -->\\n<certificateSigning CA=\"TAKServer\">\\n<certificateConfig>\\n<nameEntries>\\n<nameEntry name=\"O\" value=\"${org}\"/>\\n<nameEntry name=\"OU\" value=\"${ou}\"/>\\n</nameEntries>\\n</certificateConfig>\\n<TAKServerCAConfig keystore=\"JKS\" keystoreFile=\"/opt/tak/certs/files/${ica}-signing.jks\" keystorePass=\"atakatak\" validityDays=\"3650\" signatureAlg=\"SHA256WithRSA\"/>\\n</certificateSigning>\\n</Configuration>|" "$cfg"
+    fi
+    sed -i "s|files/truststore-root\\.jks|files/truststore-${ica}.jks|" "$cfg"
+}
+# END enable_enrollment
 
 #----------------------------------------------------------------------
 # 5. Configure cert-metadata.sh
@@ -657,6 +676,13 @@ log "Generating Root CA: ${CA_NAME}"
 $DOCKER exec -it "$TAK_CONTAINER" bash -c \
     "cd /opt/tak/certs && ./makeRootCa.sh --ca-name ${CA_NAME}"
 
+# An intermediate CA, like the Ubuntu installer makes. TAK Server signs the certificates it hands out on 8446 with its keystore
+# (${INTERMEDIATE_CA_NAME}-signing.jks). MOVE_CA=true and the "y" answer make later certificates (server, admin) signed by it too.
+log "Generating intermediate (signing) CA: ${INTERMEDIATE_CA_NAME}"
+$DOCKER exec -it "$TAK_CONTAINER" bash -c \
+    "cd /opt/tak/certs && echo y | MOVE_CA=true ./makeCert.sh ca ${INTERMEDIATE_CA_NAME}"
+[ -s "tak/certs/files/${INTERMEDIATE_CA_NAME}-signing.jks" ] || { err "No signing keystore was made for ${INTERMEDIATE_CA_NAME}"; exit 1; }
+
 log "Generating server certificate: takserver"
 $DOCKER exec -it "$TAK_CONTAINER" bash -c \
     "cd /opt/tak/certs && ./makeCert.sh server takserver"
@@ -665,9 +691,16 @@ log "Generating admin certificate: ${ADMIN_CERT}"
 $DOCKER exec -it "$TAK_CONTAINER" bash -c \
     "cd /opt/tak/certs && ./makeCert.sh client ${ADMIN_CERT}"
 
+log "Enabling certificate enrollment on 8446"
+enable_enrollment tak/CoreConfig.xml "$INTERMEDIATE_CA_NAME" "$ORGANIZATION" "$ORGANIZATIONAL_UNIT" || exit 1
+
+# Restart the whole container, not `configureInDocker.sh` inside it (ops #703). That script stops the running TAK processes with
+# `ps | grep | kill`, and the 5.8 hardened image has no `ps`, so it killed nothing and started a second full set of Java processes
+# beside the first. The first set (started before any certificate existed) kept the old CoreConfig.xml and the old truststore, so
+# 8446 answered HTTP 500 on some runs and 8089 refused the certificates TAK signs on others. The container's own start command
+# (configureInDocker.sh init) starts one clean set that reads the new files.
 log "Restarting TAK Server to load certificates..."
-$DOCKER exec -d "$TAK_CONTAINER" bash -c \
-    "cd /opt/tak/ && ./configureInDocker.sh"
+$DOCKER restart "$TAK_CONTAINER" > /dev/null
 
 log "Waiting 45s for TAK Server to restart with certs..."
 sleep 45
@@ -755,7 +788,7 @@ echo "    DB Logs: docker logs -f ${DB_CONTAINER}"
 echo "    Stop:    docker stop ${TAK_CONTAINER} ${DB_CONTAINER}"
 echo "    Start:   docker start ${DB_CONTAINER} ${TAK_CONTAINER}"
 echo "    Shell:   docker exec -it ${TAK_CONTAINER} bash"
-echo "    Restart: docker exec -d ${TAK_CONTAINER} bash -c 'cd /opt/tak && ./configureInDocker.sh'"
+echo "    Restart: docker restart ${TAK_CONTAINER}"
 echo ""
 echo "  Optional Compose (from repo clone, after images are built):"
 echo "    export VERSION=\"${VERSION}\""

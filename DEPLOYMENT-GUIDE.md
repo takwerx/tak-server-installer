@@ -303,7 +303,7 @@ What the guide expects at a high level (matches `docker/tak-docker-install.sh`):
 4. `docker run` the DB container with **`--network-alias tak-database`** (Compose in this repo uses the same alias on a user-defined network).
 5. `docker build` for **`takserver`** using `docker/Dockerfile.takserver`.
 6. `docker run` the TAK Server container with the published ports (8089, 8443, 8446 open; 8444, 9000, 9001 on this machine only unless you turn federation on, see [Published ports](#published-ports-and-the-docker-firewall)).
-7. Configure **`tak/certs/cert-metadata.sh`**, generate CA and certs inside the container, then **`./configureInDocker.sh`**, tail **`tak/logs/`** from the host, and run **UserManager** to authorize the admin client PEM.
+7. Configure **`tak/certs/cert-metadata.sh`**, generate the root CA, an intermediate (signing) CA and the server and admin certs inside the container, turn on certificate enrollment on 8446 (a `certificateSigning` block in `CoreConfig.xml`), restart the container (`docker restart`), tail **`tak/logs/`** from the host, and run **UserManager** to authorize the admin client PEM.
 
 For the newest PDF, always check [TAK.gov](https://tak.gov) in case the bundled copy is behind your deployment.
 
