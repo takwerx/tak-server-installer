@@ -694,9 +694,13 @@ $DOCKER exec -it "$TAK_CONTAINER" bash -c \
 log "Enabling certificate enrollment on 8446"
 enable_enrollment tak/CoreConfig.xml "$INTERMEDIATE_CA_NAME" "$ORGANIZATION" "$ORGANIZATIONAL_UNIT" || exit 1
 
+# Restart the whole container, not `configureInDocker.sh` inside it (ops #703). That script stops the running TAK processes with
+# `ps | grep | kill`, and the 5.8 hardened image has no `ps`, so it killed nothing and started a second full set of Java processes
+# beside the first. The first set (started before any certificate existed) kept the old CoreConfig.xml and the old truststore, so
+# 8446 answered HTTP 500 on some runs and 8089 refused the certificates TAK signs on others. The container's own start command
+# (configureInDocker.sh init) starts one clean set that reads the new files.
 log "Restarting TAK Server to load certificates..."
-$DOCKER exec -d "$TAK_CONTAINER" bash -c \
-    "cd /opt/tak/ && ./configureInDocker.sh"
+$DOCKER restart "$TAK_CONTAINER" > /dev/null
 
 log "Waiting 45s for TAK Server to restart with certs..."
 sleep 45
@@ -784,7 +788,7 @@ echo "    DB Logs: docker logs -f ${DB_CONTAINER}"
 echo "    Stop:    docker stop ${TAK_CONTAINER} ${DB_CONTAINER}"
 echo "    Start:   docker start ${DB_CONTAINER} ${TAK_CONTAINER}"
 echo "    Shell:   docker exec -it ${TAK_CONTAINER} bash"
-echo "    Restart: docker exec -d ${TAK_CONTAINER} bash -c 'cd /opt/tak && ./configureInDocker.sh'"
+echo "    Restart: docker restart ${TAK_CONTAINER}"
 echo ""
 echo "  Optional Compose (from repo clone, after images are built):"
 echo "    export VERSION=\"${VERSION}\""
