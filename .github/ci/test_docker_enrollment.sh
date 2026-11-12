@@ -134,7 +134,7 @@ l_int=$(line_of 'makeCert\.sh ca \$\{INTERMEDIATE_CA_NAME\}')
 l_srv=$(line_of 'makeCert\.sh server ')
 l_cli=$(line_of 'makeCert\.sh client ')
 l_call=$(line_of '^enable_enrollment tak/CoreConfig\.xml ')
-l_rst=$(line_of 'configureInDocker\.sh"$')
+l_rst=$(line_of '^\$DOCKER restart "\$TAK_CONTAINER"')
 if [ -n "$l_int" ] && [ -n "$l_root" ] && [ -n "$l_srv" ] && [ -n "$l_cli" ] && [ "$l_root" -lt "$l_int" ] && [ "$l_int" -lt "$l_srv" ] && [ "$l_int" -lt "$l_cli" ]; then
   ok "install script: the intermediate CA is made after the root CA and before the server and admin certificates"
 else
@@ -144,6 +144,13 @@ if [ -n "$l_call" ] && [ -n "$l_rst" ] && [ -n "$l_int" ] && [ "$l_int" -lt "$l_
   ok "install script: enrollment is enabled after the intermediate CA exists and before TAK Server restarts"
 else
   fail "install script: enable_enrollment must be called after the intermediate CA is made and before the restart" "intermediate=$l_int call=$l_call restart=$l_rst"
+fi
+# The restart must be a container restart. `docker exec ... configureInDocker.sh` kills nothing in the 5.8 hardened image (no `ps`),
+# so it starts a second set of TAK processes beside the first, and the first keeps the old CoreConfig.xml and truststore.
+if grep -qE '^\$DOCKER restart "\$TAK_CONTAINER"' "$INSTALL" && ! grep -qE '^[[:space:]]*"cd /opt/tak/ && \./configureInDocker\.sh"' "$INSTALL"; then
+  ok "install script: certificates are loaded by restarting the container, not by a second configureInDocker.sh"
+else
+  fail "install script: restart the TAK container with docker restart (a second configureInDocker.sh inside it leaves the old processes running)"
 fi
 if grep -qE '^INTERMEDIATE_CA_NAME=' "$INSTALL"; then ok "install script: INTERMEDIATE_CA_NAME is set"; else fail "install script: INTERMEDIATE_CA_NAME is not set"; fi
 
