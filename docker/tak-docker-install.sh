@@ -390,6 +390,46 @@ if [ -n "$DB_BASE_IMAGE" ] && grep -Eq "$OLD_BASE_RE" "$DB_DOCKERFILE"; then
     DB_DOCKERFILE="$PATCHED_DOCKERFILE"
 fi
 
+# >>> pgdg-major (ops #702; tested by .github/ci/test_db_pgdg_repo.sh)
+# The 5.8 hardened DB image starts FROM ubi10/ubi:10.2, but its own "dnf update" moves it to the newest RHEL minor
+# (10.3 since Nov 2026). PGDG's repo file reads baseurl=.../redhat/rhel-$releasever_major.$releasever_minor-$basearch
+# (older ones: rhel-$releasever-$basearch), and PGDG publishes a new minor's folder only some time after Red Hat ships
+# it. Until then every PGDG repo 404s and the image build stops at "dnf install ... pgdg-redhat-repo-latest.noarch.rpm".
+# This comes back at every RHEL minor. PGDG's rhel-<major> folder carries the same packages as its newest minor, and
+# the image is always on the newest minor, so the patched copy adds one RUN after every RUN that installs the
+# pgdg-redhat-repo rpm, pointing only the pgdg*.repo baseurls at rhel-<major>. UBI, EPEL and Rocky repos are untouched.
+# Same fix as infra-TAK's _patch_tak_db_pgdg_releasever. A Dockerfile without that rpm is built as shipped.
+PGDG_MAJOR_MARK='# tak-server-installer: PGDG repos on the EL major path (ops #702)'
+read -r -d '' PGDG_MAJOR_STEP <<'PGDG_EOF' || true
+RUN for f in /etc/yum.repos.d/pgdg*.repo; do [ -f "$f" ] && sed -i 's|/rhel-\$releasever[_a-z.$]*-\$basearch|/rhel-'"$(rpm -E %rhel)"'-$basearch|g' "$f"; done; true
+PGDG_EOF
+# Writes a copy of Dockerfile $1 to $2 with the step after each pgdg-redhat-repo RUN. Returns 1 if it added none.
+pgdg_major_patch() {
+    PGDG_STEP="${PGDG_MAJOR_MARK}"$'\n'"${PGDG_MAJOR_STEP}" awk '
+        { print }
+        !inrun && /^[[:space:]]*[Rr][Uu][Nn][[:space:]]/ { inrun = 1; blk = "" }
+        inrun {
+            blk = blk $0 "\n"
+            if ($0 !~ /\\[[:space:]]*$/) {
+                inrun = 0
+                if (blk ~ /pgdg-redhat-repo[^[:space:]"'\'']*\.rpm/) { print ENVIRON["PGDG_STEP"]; n++ }
+            }
+        }
+        END { exit (n ? 0 : 1) }' "$1" > "$2"
+}
+# <<< pgdg-major
+if ! grep -qF "$PGDG_MAJOR_MARK" "$DB_DOCKERFILE"; then
+    PGDG_DOCKERFILE="${DB_DOCKERFILE%.patched}.patched"
+    if pgdg_major_patch "$DB_DOCKERFILE" "${PGDG_DOCKERFILE}.tmp"; then
+        mv -f "${PGDG_DOCKERFILE}.tmp" "$PGDG_DOCKERFILE"
+        warn "PostgreSQL repos in the DB image use the RHEL major version (PGDG has no folder yet for the newest RHEL minor)."
+        log "Patched copy: ${PGDG_DOCKERFILE} (original unchanged)"
+        DB_DOCKERFILE="$PGDG_DOCKERFILE"
+    else
+        rm -f "${PGDG_DOCKERFILE}.tmp"
+    fi
+fi
+
 $DOCKER build -t takserver-db:"${VERSION}" -f "$DB_DOCKERFILE" .
 
 log "Database image built"
