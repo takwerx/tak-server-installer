@@ -60,10 +60,20 @@ jobs:
       - run: pip install pyyaml
       - run: bash .github/ci/test_docker_ports.sh
 
+  # The Docker install sets up certificate enrollment on 8446: an intermediate signing CA and a certificateSigning block (ops #703).
+  docker-enrollment:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: bash .github/ci/test_docker_enrollment.sh
+
   # One stable name to require in branch protection. A failed or cancelled job fails it.
   checks-ok:
     if: always()
-    needs: [static, release-hygiene, docker-ports]
+    needs: [static, release-hygiene, docker-ports, docker-enrollment]
     runs-on: ubuntu-24.04
     steps:
       - env:
