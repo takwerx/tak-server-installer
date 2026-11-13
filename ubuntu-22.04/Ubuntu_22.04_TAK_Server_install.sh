@@ -80,8 +80,37 @@ apt-get install -y lsb-release
 # Create keyrings directory
 mkdir -p /etc/apt/keyrings
 
-# Download PostgreSQL GPG key
-curl https://www.postgresql.org/media/keys/ACCC4CF8.asc --output /etc/apt/keyrings/postgresql.asc
+# Download PostgreSQL GPG key. A dropped download used to leave an empty key file, and apt then
+# failed with NO_PUBKEY 7FCC7D46ACCC4CF8 (ops #728). Retry, check what arrived, and stop if it never does.
+# >>> pgdg-key
+PGDG_KEY_URL="https://www.postgresql.org/media/keys/ACCC4CF8.asc"
+PGDG_KEY_FILE="${PGDG_KEY_FILE:-/etc/apt/keyrings/postgresql.asc}"
+download_pgdg_key() {
+    local tries=5 n=1 tmp
+    tmp=$(mktemp) || return 1
+    while [ "$n" -le "$tries" ]; do
+        # -f: an HTTP error is a failure. The file must also hold a real key, not an empty or error page.
+        if curl -fsSL --connect-timeout 15 --max-time 60 -o "$tmp" "$PGDG_KEY_URL" \
+            && grep -q -- "-----BEGIN PGP PUBLIC KEY BLOCK-----" "$tmp" \
+            && install -m 0644 "$tmp" "$PGDG_KEY_FILE"; then
+            rm -f "$tmp"
+            return 0
+        fi
+        echo "  PostgreSQL key download failed (attempt $n of $tries)"
+        [ "$n" -lt "$tries" ] && sleep $((n * 3))
+        n=$((n + 1))
+    done
+    rm -f "$tmp"
+    return 1
+}
+# <<< pgdg-key
+
+if ! download_pgdg_key; then
+    echo ""
+    echo "ERROR: Could not download the PostgreSQL signing key from $PGDG_KEY_URL"
+    echo "Check this server's internet connection (DNS, firewall, proxy), then run this script again."
+    exit 1
+fi
 
 # Add PostgreSQL repository
 cat <<EOF | tee /etc/apt/sources.list.d/postgresql.list > /dev/null
