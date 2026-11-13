@@ -69,19 +69,91 @@ install_docker_apt() {
     sudo systemctl enable --now docker
 }
 
-install_docker_dnf() {
-    sudo dnf install -y docker
-    sudo dnf install -y docker-buildx-plugin || warn "docker-buildx-plugin not available from the enabled repos."
-    sudo systemctl enable --now docker
+# Rocky, RHEL, Alma and CentOS do not ship Docker. "dnf install docker" there installs podman-docker, a shim that runs Podman
+# under the name "docker" and has no docker.service, so "systemctl enable --now docker" failed (ops #727). These hosts get Docker CE
+# from Docker's own repo. Fedora has a repo of its own. Any other dnf host (Amazon Linux, for example) keeps its distro "docker".
+# BEGIN docker_engine (the CI check .github/ci/test_docker_engine.sh runs exactly these functions)
+OS_RELEASE_FILE="${OS_RELEASE_FILE:-/etc/os-release}"
+
+# True when the "docker" command is Podman's Docker-compatible shim (the podman-docker package), not Docker.
+docker_is_podman() {
+    local out
+    command -v docker &>/dev/null || return 1
+    out="$(docker --version 2>&1; readlink -f "$(command -v docker)" 2>/dev/null)"
+    case "$out" in
+        *[Pp]odman*) return 0 ;;
+    esac
+    return 1
 }
 
+# Prints rhel or fedora: the folder of Docker's repo for this OS. Prints nothing for any other OS.
+docker_ce_repo_flavor() {
+    local id="" like=""
+    if [ -r "$OS_RELEASE_FILE" ]; then
+        # shellcheck source=/dev/null
+        id=$(. "$OS_RELEASE_FILE" && echo "${ID:-}")
+        # shellcheck source=/dev/null
+        like=$(. "$OS_RELEASE_FILE" && echo "${ID_LIKE:-}")
+    fi
+    # Rocky and Alma list fedora in ID_LIKE too, so the OS's own ID is checked first.
+    if [ "$id" = fedora ]; then
+        echo fedora
+        return 0
+    fi
+    case " $id $like " in
+        *" rhel "*|*" centos "*) echo rhel ;;
+    esac
+    return 0
+}
+
+install_docker_dnf() {
+    local flavor
+    flavor=$(docker_ce_repo_flavor)
+    if [ -n "$flavor" ]; then
+        log "Installing Docker CE from Docker's repo (download.docker.com/linux/${flavor})"
+        command -v curl &>/dev/null || sudo dnf install -y curl
+        sudo curl -fsSL "https://download.docker.com/linux/${flavor}/docker-ce.repo" -o /etc/yum.repos.d/docker-ce.repo || {
+            err "Could not download Docker's repo file from download.docker.com. Check this machine's internet access, then re-run."
+            return 1
+        }
+        # podman-docker owns /usr/bin/docker and conflicts with Docker CE. Podman itself stays installed.
+        if rpm -q podman-docker &>/dev/null; then
+            warn "Removing podman-docker (a stand-in for the docker command). Podman itself stays."
+            sudo dnf remove -y podman-docker
+        fi
+        sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    else
+        sudo dnf install -y docker
+        sudo dnf install -y docker-buildx-plugin || warn "docker-buildx-plugin not available from the enabled repos."
+    fi
+    # Never call enable on a service that is not there: say what is wrong instead of a bare systemctl error.
+    if ! systemctl cat docker.service &>/dev/null; then
+        err "No docker.service after the install, so this is not Docker (a Podman stand-in has none)."
+        echo "  Install Docker CE for this OS (https://docs.docker.com/engine/install/), then re-run."
+        return 1
+    fi
+    sudo systemctl enable --now docker
+}
+# END docker_engine
+
 # Docker
+NEED_DOCKER=0
 if ! command -v docker &>/dev/null; then
     warn "Docker not found. Installing..."
+    NEED_DOCKER=1
+elif docker_is_podman; then
+    warn "The docker command on this machine is Podman's stand-in (podman-docker), not Docker. TAK Server's Docker install needs Docker."
+    if ! command -v dnf &>/dev/null; then
+        err "Remove the podman-docker package and install Docker for this OS (https://docs.docker.com/engine/install/), then re-run."
+        exit 1
+    fi
+    NEED_DOCKER=1
+fi
+if [ "$NEED_DOCKER" -eq 1 ]; then
     if command -v apt-get &>/dev/null; then
         install_docker_apt
     elif command -v dnf &>/dev/null; then
-        install_docker_dnf
+        install_docker_dnf || exit 1
     else
         err "Install Docker manually for this OS, then re-run."
         exit 1
