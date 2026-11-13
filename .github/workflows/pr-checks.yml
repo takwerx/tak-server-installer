@@ -90,10 +90,20 @@ jobs:
           persist-credentials: false
       - run: bash .github/ci/test_pgdg_key.sh
 
+  # The scripts are stored as executable, so a user's Quick Start `chmod +x` is not a local change that blocks `git pull` (ops #731).
+  script-modes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: bash .github/ci/test_script_modes.sh
+
   # One stable name to require in branch protection. A failed or cancelled job fails it.
   checks-ok:
     if: always()
-    needs: [static, release-hygiene, docker-ports, docker-enrollment, db-pgdg-repo, pgdg-key]
+    needs: [static, release-hygiene, docker-ports, docker-enrollment, db-pgdg-repo, pgdg-key, script-modes]
     runs-on: ubuntu-24.04
     steps:
       - env:
