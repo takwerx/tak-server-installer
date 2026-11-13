@@ -35,7 +35,8 @@ if [ -n "$call_at" ] && [ -n "$apt_at" ] && [ "$call_at" -lt "$apt_at" ]; then o
 else fail "install script: download_pgdg_key is not called before apt update (call ${call_at:-none}, apt update ${apt_at:-none})"; fi
 
 # The script must stop (exit 1) when the download fails, not carry on.
-if sed -n "${call_at:-1},\$p" "$INSTALL" | head -6 | grep -q '^    exit 1'; then ok "install script: stops with exit 1 when the key cannot be downloaded"; \
+after_call=$(awk -v s="${call_at:-1}" 'NR >= s && NR < s + 6' "$INSTALL")   # captured first: a closed pipe fails under pipefail
+if grep -q '^    exit 1' <<<"$after_call"; then ok "install script: stops with exit 1 when the key cannot be downloaded"; \
 else fail "install script: no exit 1 right after a failed key download"; fi
 
 # No other curl may write the key file without a check.
