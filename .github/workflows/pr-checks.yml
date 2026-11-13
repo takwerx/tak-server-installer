@@ -70,6 +70,16 @@ jobs:
           persist-credentials: false
       - run: bash .github/ci/test_docker_enrollment.sh
 
+  # The script that turns on ATAK sign-in (8446) on Docker installs made before v1.0.2, run against a fake docker (ops #729).
+  docker-enable-enrollment:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: bash .github/ci/test_docker_enable_enrollment.sh
+
   # The 5.8 hardened DB image build uses PGDG's rhel-<major> repos, so a new RHEL minor cannot break it (ops #702).
   db-pgdg-repo:
     runs-on: ubuntu-24.04
@@ -83,7 +93,7 @@ jobs:
   # One stable name to require in branch protection. A failed or cancelled job fails it.
   checks-ok:
     if: always()
-    needs: [static, release-hygiene, docker-ports, docker-enrollment, db-pgdg-repo]
+    needs: [static, release-hygiene, docker-ports, docker-enrollment, docker-enable-enrollment, db-pgdg-repo]
     runs-on: ubuntu-24.04
     steps:
       - env:
