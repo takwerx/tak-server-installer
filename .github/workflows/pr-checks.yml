@@ -100,10 +100,20 @@ jobs:
           persist-credentials: false
       - run: bash .github/ci/test_pgdg_key.sh
 
+  # The Ubuntu Caddy script retries the signing key and repo list downloads and stops with a clear message if they never work (ops #730).
+  caddy-key:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: bash .github/ci/test_caddy_key.sh
+
   # One stable name to require in branch protection. A failed or cancelled job fails it.
   checks-ok:
     if: always()
-    needs: [static, release-hygiene, docker-ports, docker-enrollment, docker-engine, db-pgdg-repo, pgdg-key]
+    needs: [static, release-hygiene, docker-ports, docker-enrollment, docker-engine, db-pgdg-repo, pgdg-key, caddy-key]
     runs-on: ubuntu-24.04
     steps:
       - env:
