@@ -401,6 +401,22 @@ docker ps --format '{{.Names}}\t{{.Ports}}'          # want 8444, 9000, 9001 sho
 sudo iptables -S TAK-DOCKER-FW                       # want RETURN for 8089, 8443, 8446, then DROP
 ```
 
+### Installed with v1.0.1 or older? Turn on ATAK sign-in (port 8446)
+
+Docker installs made with an installer older than v1.0.2 have no certificate enrollment set up. ATAK users who type the server address, a username and a password get no certificate (8446 answers HTTP 500). Running `tak-docker-install.sh` again does not fix it: it stops at the existing database container and changes nothing, on purpose, because a re-run would delete the data.
+
+Get the new scripts (`git pull`), then run this on the machine that runs TAK Server:
+
+```
+./docker/tak-docker-enable-enrollment.sh
+```
+
+It makes an intermediate signing CA under your root CA, adds the `certificateSigning` block to `tak/CoreConfig.xml` (the old file is kept beside it, with the date in its name) and restarts the TAK Server container, which takes about a minute. The database, users, existing certificates and ports are not changed, and `ca.pem` stays your root CA, so certificates you make later with `makeCert.sh` are signed as before. If TAK Server does not come back, the script puts the old `CoreConfig.xml` back and restarts it again.
+
+To prove it works, add `--verify-user NAME` with an existing TAK user. The script asks for that user's password (it is not saved) and checks that 8446 answers HTTP 200 for it. Without that option, sign in once from an ATAK device. Running the script a second time changes nothing.
+
+To undo it: `cp tak/CoreConfig.xml.before-enrollment-<date> tak/CoreConfig.xml && docker restart takserver-<VERSION>`.
+
 ### Database port (5432)
 
 TAK Server reaches PostgreSQL over the Docker network (`tak-database`), so the database port only needs to be reachable from the host itself. The script and Compose file publish it on **`127.0.0.1:5432`** only. Docker-published ports bypass `ufw`/`firewalld`, so don't rely on the host firewall to keep 5432 closed.
