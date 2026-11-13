@@ -70,6 +70,16 @@ jobs:
           persist-credentials: false
       - run: bash .github/ci/test_docker_enrollment.sh
 
+  # The Docker install puts real Docker on Rocky / RHEL, not the podman-docker stand-in that has no docker.service (ops #727).
+  docker-engine:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: bash .github/ci/test_docker_engine.sh
+
   # The script that turns on ATAK sign-in (8446) on Docker installs made before v1.0.2, run against a fake docker (ops #729).
   docker-enable-enrollment:
     runs-on: ubuntu-24.04
@@ -100,10 +110,20 @@ jobs:
           persist-credentials: false
       - run: bash .github/ci/test_pgdg_key.sh
 
+  # The Ubuntu Caddy script retries the signing key and repo list downloads and stops with a clear message if they never work (ops #730).
+  caddy-key:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: bash .github/ci/test_caddy_key.sh
+
   # One stable name to require in branch protection. A failed or cancelled job fails it.
   checks-ok:
     if: always()
-    needs: [static, release-hygiene, docker-ports, docker-enrollment, docker-enable-enrollment, db-pgdg-repo, pgdg-key]
+    needs: [static, release-hygiene, docker-ports, docker-enrollment, docker-engine, docker-enable-enrollment, db-pgdg-repo, pgdg-key, caddy-key]
     runs-on: ubuntu-24.04
     steps:
       - env:

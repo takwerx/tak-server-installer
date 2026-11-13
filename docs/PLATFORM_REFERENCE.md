@@ -33,6 +33,12 @@ Scope: `ubuntu-22.04/` scripts, `docker/` and `patches/`. There are no Rocky/RHE
 | Judge "is Pro on" with `pro status --format json` (`attached`), not by the pin files | same | ✅ verified Oct 30, 2026 on Azure Ubuntu 24.04 |
 | PGDG yum repos (inside TAK 5.8's hardened DB image, EL 10): `pgdg-redhat-repo` 42.0-69 writes `baseurl=.../redhat/rhel-$releasever_major.$releasever_minor-$basearch` (older ones: `rhel-$releasever-$basearch`). PGDG publishes a new RHEL minor's folder some time after Red Hat ships it, and the image's own `dnf update` always moves to the newest minor, so the DB image build 404s at every new minor until PGDG catches up (Nov 12, 2026: no `rhel-10.3`; `rhel-10`, `rhel-10.1`, `rhel-10.2` present). PGDG's `rhel-<major>` folder carries the same builds as its newest minor. The Docker script points the pgdg baseurls at `rhel-<major>` in a patched copy (ops #702) | https://download.postgresql.org/pub/repos/yum/common/redhat/ (folder list) and the repo rpm's own `.repo` file | ✅ verified Nov 12, 2026 on aarch64 (real image build, infra-TAK ops #686). x86 and this script: see the PR |
 
+## Docker engine on Rocky / RHEL
+
+| Contract | Source | Status |
+|---|---|---|
+| Rocky, RHEL, Alma and CentOS do not ship Docker. `dnf install docker` there installs `podman-docker`, a shim that runs Podman under the name `docker`. It has no `docker.service`, so `systemctl enable --now docker` fails with `Unit file docker.service does not exist` (ops #727). The Docker script installs Docker CE from `https://download.docker.com/linux/rhel/docker-ce.repo` (Fedora: `/linux/fedora/`) and removes only `podman-docker`; Podman stays. `docker-buildx-plugin` comes from that same repo, not from the Rocky repos | https://docs.docker.com/engine/install/rhel/ | ✅ verified Nov 13, 2026 on Rocky 9.8 (fresh-install box): `dnf install docker` gave podman-docker 5.8.2 and the error above; the Docker CE install gave Docker 29.9.3 with buildx 0.39 and TAK Server 5.8 came up |
+
 ## Caddy and Let's Encrypt
 
 | Contract | Source | Status |
