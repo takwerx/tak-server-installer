@@ -43,6 +43,7 @@ for doc in "${docs[@]}"; do
       cd\ *) dir="" ;;
       chmod\ +x\ *)
         target=${line#chmod +x }; target=${target%%[[:space:]]*}
+        # shellcheck disable=SC2088  # the docs write a literal ~/ and this matches that text, it is not a path to expand
         case "$target" in "~/tak-server-installer/"*) path=${target#"~/tak-server-installer/"} ;; *) path="${dir:+$dir/}$target" ;; esac
         # Scripts the repo does not ship (the Rocky 9 ones) are skipped: nothing to change.
         if [ -f "$work/clone/$path" ]; then chmod +x "$work/clone/$path"; ran=$((ran + 1)); fi ;;
