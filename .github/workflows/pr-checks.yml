@@ -150,10 +150,30 @@ jobs:
           persist-credentials: false
       - run: bash .github/ci/test_docker_update_db.sh
 
+  # The Docker install warns, and keeps going, on a machine with under 8 GB of RAM (ops #752).
+  docker-ram-warning:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: bash .github/ci/test_docker_ram_warning.sh
+
+  # The Docker install takes the TAK ZIP's path as an argument and refuses a wrong file (ops #752).
+  docker-zip-path:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: bash .github/ci/test_docker_zip_path.sh
+
   # One stable name to require in branch protection. A failed or cancelled job fails it.
   checks-ok:
     if: always()
-    needs: [static, release-hygiene, docker-ports, docker-enrollment, docker-engine, docker-enable-enrollment, db-pgdg-repo, pgdg-key, caddy-key, script-modes, docker-non-root, docker-update-db]
+    needs: [static, release-hygiene, docker-ports, docker-enrollment, docker-engine, docker-enable-enrollment, db-pgdg-repo, pgdg-key, caddy-key, script-modes, docker-non-root, docker-update-db, docker-ram-warning, docker-zip-path]
     runs-on: ubuntu-24.04
     steps:
       - env:

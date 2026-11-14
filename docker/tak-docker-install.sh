@@ -8,6 +8,11 @@
 # Uses the official takserver-docker-*.zip from https://tak.gov — not the .deb/.rpm.
 # After images exist, you can run stacks with this script (docker run) or
 # docker/docker-compose.yml (docker compose).
+#
+# Usage:
+#   ./tak-docker-install.sh [/path/to/takserver-docker[-hardened]-<version>.zip]
+# With no argument it uses $TAK_ZIP, then any takserver-docker-*.zip in ~/tak-docker (and asks which
+# one when there are several). A ZIP given by path can be anywhere; it is extracted into ~/tak-docker.
 #==========================================================================
 
 set -e
@@ -15,6 +20,32 @@ set -e
 # Where this script lives, found before the first cd: the README runs it as ./docker/tak-docker-install.sh,
 # and a relative $0 no longer points at the script once it has changed into the install folder.
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+
+# BEGIN zip_arg
+# Print the full path of the ZIP the user named (first argument, else $TAK_ZIP). Print nothing when none was
+# named. Return 1 with a message on stderr when the file is missing or is not a takserver-docker ZIP.
+zip_arg() {
+    local z="${1:-${TAK_ZIP:-}}"
+    [ -n "$z" ] || return 0
+    if [ ! -f "$z" ]; then
+        echo "ZIP not found: $z" >&2
+        return 1
+    fi
+    case "$(basename "$z")" in
+        takserver-docker-*.zip) ;;
+        *) echo "$(basename "$z") is not a TAK Server Docker ZIP (expected takserver-docker-*.zip or takserver-docker-hardened-*.zip)." >&2
+           return 1 ;;
+    esac
+    readlink -f "$z"
+}
+# END zip_arg
+
+case "${1:-}" in
+    -h|--help) sed -n '/^# Usage:/,/^#====/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*) echo "Unknown option: $1 (try --help)" >&2; exit 1 ;;
+esac
+# Resolved here, before the script changes folder, so a relative path still points at the right file.
+NAMED_ZIP=$(zip_arg "${1:-}") || exit 1
 
 RED='\033[0;31m'
 GRN='\033[0;32m'
@@ -176,6 +207,20 @@ if [ "$NEED_DOCKER" -eq 1 ]; then
 fi
 log "Docker: $(docker --version)"
 
+# BEGIN ram_check
+# Warn (never stop) when the machine has under 8 GB of RAM: TAK Server runs several JVMs beside PostgreSQL
+# and a small machine tends to run out of memory. MemTotal reads a bit under the sticker size, so the
+# limit is 7,500,000 kB. MEMINFO can point at another file (the CI check does).
+ram_check() {
+    local mem_kb
+    mem_kb=$(awk '/^MemTotal:/ {print $2}' "${MEMINFO:-/proc/meminfo}" 2>/dev/null)
+    if [ "${mem_kb:-0}" -gt 0 ] && [ "$mem_kb" -lt 7500000 ]; then
+        warn "Only $((mem_kb / 1024)) MB of RAM. TAK Server needs 8 GB or more and may fail to start or be stopped for lack of memory."
+    fi
+}
+# END ram_check
+ram_check
+
 # Check we can run docker without sudo
 if ! docker info &>/dev/null; then
     warn "Cannot run docker without sudo. Trying with sudo for this session..."
@@ -252,17 +297,22 @@ step "1: Locate TAK Server Docker ZIP"
 
 mkdir -p "$INSTALL_DIR"
 
-# Find all takserver docker ZIPs in the install dir
+# The ZIP named on the command line (or in $TAK_ZIP), else every takserver docker ZIP in the install dir
 ZIPS=()
-while IFS= read -r f; do
-    ZIPS+=("$f")
-done < <(ls "${INSTALL_DIR}"/takserver-docker-*.zip 2>/dev/null)
+if [ -n "$NAMED_ZIP" ]; then
+    ZIPS=("$NAMED_ZIP")
+else
+    while IFS= read -r f; do
+        ZIPS+=("$f")
+    done < <(ls "${INSTALL_DIR}"/takserver-docker-*.zip 2>/dev/null)
+fi
 
 if [ ${#ZIPS[@]} -eq 0 ]; then
     err "No takserver-docker-*.zip found in ${INSTALL_DIR}"
     echo ""
     echo "  Download any TAK Server Docker release from https://tak.gov"
     echo "  and place the ZIP in: ${INSTALL_DIR}/"
+    echo "  or pass its path:     $0 /path/to/takserver-docker-<version>.zip"
     echo ""
     echo "  Examples:"
     echo "    takserver-docker-5.6-RELEASE-57.zip"
