@@ -129,7 +129,7 @@ if has t1 '^docker create -it --volumes-from takserver-db-5\.8-RELEASE-75-pre-pg
 else fail "the new container does not match the old one" "$(grep '^docker create' "$work/t1/docker.log")"; fi
 if ! has t1 '^docker rm ' && ! has t1 '^docker rmi .*pre-pgupdate' && ! has t1 '^docker volume'; then ok "the old container and image are kept (nothing removed, no volume touched)"; else fail "the swap removed something" "$(grep -E '^docker (rm|volume)' "$work/t1/docker.log")"; fi
 bk=$(ls "$work"/t1/bundle/tak-db-backup-5.8-RELEASE-75-*.sql 2>/dev/null | head -1)
-if [ -n "$bk" ] && grep -q 'cluster dump complete' "$bk" && [ "$(stat -f %Lp "$bk" 2>/dev/null || stat -c %a "$bk")" = "600" ]; then ok "a complete backup is written before anything stops, readable by its owner only"; else fail "no complete owner-only backup" "$(ls -l "$work"/t1/bundle 2>&1)"; fi
+if [ -n "$bk" ] && grep -q 'cluster dump complete' "$bk" && [ "$(ls -l "$bk" | cut -c1-10)" = "-rw-------" ]; then ok "a complete backup is written before anything stops, readable by its owner only"; else fail "no complete owner-only backup" "$(ls -l "$work"/t1/bundle 2>&1)"; fi
 if grep -q 'tak-db-backup' "$work/out.txt" && grep -q 'Old container kept' "$work/out.txt" && grep -q 'docker rename' "$work/out.txt"; then ok "the output names the backup, the kept container and how to go back"; else fail "the output does not say how to undo"; fi
 
 # --- 2. nothing newer to give: no change at all
