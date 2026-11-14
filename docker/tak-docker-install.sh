@@ -27,6 +27,18 @@ warn() { echo -e "${YEL}[!]${NC} $1"; }
 err()  { echo -e "${RED}[ERROR]${NC} $1"; }
 step() { echo -e "\n${CYN}=== STEP $1 ===${NC}"; }
 
+# BEGIN as_root
+# Run a command as root: directly when the script already runs as root, through sudo otherwise.
+# Needed for ownership changes (chown/chgrp to another user or group), which a normal user cannot make.
+as_root() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
+# END as_root
+
 echo ""
 echo "============================================="
 echo "  TAK Server Docker Install"
@@ -319,8 +331,20 @@ cd "$INSTALL_DIR"
 log "Extracting $(basename "$TAK_ZIP")..."
 unzip -o "$TAK_ZIP"
 
-# Find extracted dir - could be takserver-docker-X.X-RELEASE-XX or similar
-TAK_DIR=$(find . -maxdepth 1 -type d -name 'takserver-docker*' -print 2>/dev/null | sort -r | head -1)
+# Find extracted dir - could be takserver-docker-X.X-RELEASE-XX or similar.
+# Use the top-level folder named inside the ZIP you chose, so another bundle extracted here earlier (a standard one
+# next to a hardened one, or an older release) is never picked by mistake. (Fix from tranzmatt, PR #30.)
+# BEGIN pick_tak_dir
+pick_tak_dir() {  # ZIP -> the folder it extracted, relative to the current folder
+    local dir
+    dir=$(unzip -Z1 "$1" 2>/dev/null | head -1 | cut -d/ -f1)
+    if [ -z "$dir" ] || [ ! -d "$dir/tak" ]; then
+        dir=$(find . -maxdepth 1 -type d -name 'takserver-docker*' -print 2>/dev/null | sort -r | head -1)
+    fi
+    echo "$dir"
+}
+# END pick_tak_dir
+TAK_DIR=$(pick_tak_dir "$TAK_ZIP")
 if [ -z "$TAK_DIR" ]; then
     # Some ZIPs extract without a top-level directory
     if [ -d "tak" ]; then
@@ -345,6 +369,12 @@ if [ -d "tak" ]; then
     # "tee: /opt/tak/logs/takserver.log: Permission denied" and "AccessDeniedException: TAKIgniteConfig.xml".
     # Give group 0 write access (harmless for 5.6/5.7, whose containers run as root).
     chmod -R g+rwX tak
+    # Unzipped by a normal user, tak/ belongs to that user's own group, not group 0, so the write access above would
+    # not reach the containers. Hand the group to 0 (needs root); the files stay owned by this user.
+    if [ "$(id -u)" -ne 0 ]; then
+        log "Setting group 0 on tak/ so the containers can write to it (sudo)..."
+        as_root chgrp -R 0 tak
+    fi
 fi
 
 # Get version string from version.txt
@@ -560,12 +590,14 @@ if [ "$PERSIST_DB" = true ]; then
     # Hand the folder to whatever user the image runs as; 5.6/5.7 images run as root and are left alone.
     DB_RUN_UID=$($DOCKER run --rm --entrypoint id takserver-db:"${VERSION}" -u 2>/dev/null | tr -d '[:space:]' || true)
     if [[ "$DB_RUN_UID" =~ ^[0-9]+$ ]] && [ "$DB_RUN_UID" != "0" ]; then
-        chown "${DB_RUN_UID}:0" "$DB_DATA_DIR"
-        chmod 700 "$DB_DATA_DIR"
+        as_root chown "${DB_RUN_UID}:0" "$DB_DATA_DIR"
+        as_root chmod 700 "$DB_DATA_DIR"
         log "Database folder owned by uid ${DB_RUN_UID} (the user the database image runs as)"
         # That image also runs initdb while it is built, and an empty bind-mounted folder hides the result
         # ("pg_ctl: directory ... is not a database cluster directory"). Copy the image's cluster in on first use.
-        if [ -z "$(ls -A "$DB_DATA_DIR" 2>/dev/null)" ]; then
+        # The folder is now mode 700 for another uid, so a normal user cannot list it: look as root, or an existing
+        # database would read as empty and be overwritten.
+        if [ -z "$(as_root ls -A "$DB_DATA_DIR" 2>/dev/null)" ]; then
             $DOCKER run --rm --entrypoint sh -v "${DB_DATA_DIR}":/seed:z takserver-db:"${VERSION}" \
                 -c 'cp -a /var/lib/postgresql/data/. /seed/' \
                 || { err "Could not initialise the database folder ${DB_DATA_DIR}"; exit 1; }
@@ -739,6 +771,38 @@ fi
 
 log "Both containers running"
 
+# BEGIN prune_health_list
+# The 5.8 hardened health checks also checksum a list of files (tak/health/<name>/critical_file_list.txt) and fail
+# when one is missing. That list names /usr/share/crypto-policies/back-ends/*/openssl.config, which the current
+# UBI 10 crypto-policies package no longer ships, so both containers stay "unhealthy" although they work.
+# Drop entries that do not exist inside the container; the rest are still checked. Older bundles have no list.
+# (From tranzmatt, PR #30.)
+prune_health_list() {
+    local container="$1" list="tak/health/$2/critical_file_list.txt" kept removed=0 line
+    [ -f "$list" ] || return 0
+    kept=$(mktemp)
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            ''|'#'*) echo "$line" >> "$kept"; continue ;;
+        esac
+        if $DOCKER exec "$container" test -e "$line" 2>/dev/null; then
+            echo "$line" >> "$kept"
+        else
+            removed=$((removed + 1))
+        fi
+    done < "$list"
+    if [ "$removed" -gt 0 ]; then
+        cp "$list" "${list}.orig"
+        cat "$kept" > "$list"
+        rm -f "tak/health/$2/critical_file_checksums.txt"
+        warn "Health check: removed ${removed} file(s) missing from ${container} from $list (original kept as ${list}.orig)"
+    fi
+    rm -f "$kept"
+}
+# END prune_health_list
+prune_health_list "$DB_CONTAINER" takserver-db
+prune_health_list "$TAK_CONTAINER" takserver
+
 #----------------------------------------------------------------------
 # 11. Generate Certificates
 #----------------------------------------------------------------------
@@ -793,10 +857,15 @@ log "Admin certificate authorized"
 #----------------------------------------------------------------------
 step "13: Fix File Permissions"
 
+# Hand the cert files to the host user so they can be copied off the box, but keep group 0: the 5.8 hardened
+# container runs as tak (uid 1001) in group 0 and must still write here to make more certs (makeCert.sh).
+# Group write goes on the folder only, so the private keys keep the owner-only mode makeCert.sh gives them.
+CERT_UID=$(id -u)
+[ "$CERT_UID" -eq 0 ] && CERT_UID=1000
 $DOCKER exec -u root "$TAK_CONTAINER" bash -c \
-    "chown -R 1000:1000 /opt/tak/certs/files/"
+    "chown -R ${CERT_UID}:0 /opt/tak/certs/files/ && chmod g+rwx /opt/tak/certs/files/"
 
-log "File permissions fixed (1000:1000)"
+log "File permissions fixed (${CERT_UID}:0)"
 
 #----------------------------------------------------------------------
 # 14. Verify

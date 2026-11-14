@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# Checks four fixes in the Docker install that came from a contributor's PR (ops #752, takwerx/tak-server-installer PR 30):
+#   1. a normal user can run it: ownership changes go through sudo, and the database folder is looked at as root
+#   2. the cert folder keeps group 0, so the 5.8 hardened container (uid 1001, group 0) can still make certs
+#   3. the hardened health check list drops files the image does not ship, and keeps the others
+#   4. the bundle named inside the ZIP is used, not whichever folder sorts last in the install folder
+# The functions are taken out of the script itself and run with docker and sudo replaced by recorders. No Docker, no root:
+#   bash .github/ci/test_docker_non_root.sh
+set -uo pipefail
+
+cd "$(git rev-parse --show-toplevel)" || exit 2
+INSTALL=docker/tak-docker-install.sh
+fails=0
+
+ok()   { echo "ok   $1"; }
+fail() { echo "FAIL $1"; shift; [ "$#" -gt 0 ] && printf '     %s\n' "$@"; fails=$((fails + 1)); }
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+extract() {  # NAME -> the code between "# BEGIN NAME" and "# END NAME"
+  local out="$work/$1.sh"
+  sed -n "/^# BEGIN $1\$/,/^# END $1\$/p" "$INSTALL" > "$out"
+  if [ "$(wc -l < "$out")" -lt 3 ]; then fail "install script: no $1 between the BEGIN and END markers"; echo "$fails check(s) failed"; exit 1; fi
+  echo "$out"
+}
+
+#=== 1. as_root: root runs it directly, a normal user goes through sudo
+as_root_fn=$(extract as_root)
+calls="$work/calls"
+sudo() { echo "sudo $*" >> "$calls"; }
+# shellcheck disable=SC1090
+. "$as_root_fn"
+FAKE_UID=1000
+id() { [ "$1" = "-u" ] && echo "$FAKE_UID" || command id "$@"; }
+
+: > "$calls"; FAKE_UID=1000
+as_root chown 1001:0 /x
+if [ "$(cat "$calls")" = "sudo chown 1001:0 /x" ]; then ok "normal user: chown goes through sudo"; else fail "normal user: chown did not go through sudo" "$(cat "$calls")"; fi
+
+: > "$calls"; FAKE_UID=0
+as_root true
+if [ ! -s "$calls" ]; then ok "root: runs the command directly, no sudo"; else fail "root: sudo was used" "$(cat "$calls")"; fi
+
+#=== the other ownership changes in the script use it too (an existing database must not read as empty to a normal user)
+if grep -nE '^[[:space:]]*(chown|chmod 700) "?\$\{?DB_(RUN_UID|DATA_DIR)' "$INSTALL" | grep -v as_root | grep -q .; then
+  fail "database folder: chown/chmod without as_root" "$(grep -nE '^[[:space:]]*(chown|chmod 700) ' "$INSTALL")"
+else ok "database folder: chown and chmod use as_root"; fi
+if grep -q 'as_root ls -A "\$DB_DATA_DIR"' "$INSTALL"; then ok "database folder: the empty check looks as root"; else fail "database folder: the empty check is not run as root (an existing database would look empty to a normal user)"; fi
+if grep -q 'as_root chgrp -R 0 tak' "$INSTALL"; then ok "tak/: group set to 0 through as_root"; else fail "tak/: no 'as_root chgrp -R 0 tak' for a normal user"; fi
+
+#=== 2. cert folder keeps group 0
+if grep -qE 'chown -R \$\{CERT_UID\}:0 /opt/tak/certs/files/' "$INSTALL"; then ok "certs/files: handed to the host user with group 0"; \
+else fail "certs/files: not chowned to \${CERT_UID}:0"; fi
+if grep -q 'chown -R 1000:1000 /opt/tak/certs/files' "$INSTALL"; then fail "certs/files: still chowned to 1000:1000 (the container then cannot write there)"; else ok "certs/files: no 1000:1000 chown"; fi
+if grep -q 'chmod g+rwx /opt/tak/certs/files/' "$INSTALL"; then ok "certs/files: folder is group-writable"; else fail "certs/files: folder is not group-writable"; fi
+
+#=== 3. health list pruning
+prune_fn=$(extract prune_health_list)
+log() { :; }
+warn() { echo "warn: $*" >> "$work/warnings"; }
+# the container "has" only the files named in $PRESENT
+PRESENT="/usr/share/a /usr/share/b"
+DOCKER=fake_docker
+fake_docker() {  # exec CONTAINER test -e FILE
+  [ "$1" = exec ] && [ "$3" = test ] && [[ " $PRESENT " == *" $5 "* ]]
+}
+# shellcheck disable=SC1090
+. "$prune_fn"
+
+mkdir -p "$work/h/tak/health/takserver" "$work/h/tak/health/takserver-db"
+( cd "$work/h" || exit 1
+  printf '# list\n/usr/share/a\n/usr/share/crypto-policies/back-ends/LEGACY/openssl.config\n/usr/share/b\n' > tak/health/takserver/critical_file_list.txt
+  echo "old-sums" > tak/health/takserver/critical_file_checksums.txt
+  printf '/usr/share/a\n' > tak/health/takserver-db/critical_file_list.txt
+  echo "db-sums" > tak/health/takserver-db/critical_file_checksums.txt
+  prune_health_list ctr takserver
+  prune_health_list ctr-db takserver-db
+  prune_health_list ctr none-here   # no list at all: must not fail
+  echo "rc-nolist=$?" > "$work/rc"
+)
+list="$work/h/tak/health/takserver/critical_file_list.txt"
+if ! grep -q 'openssl.config' "$list"; then ok "health list: the file the image does not ship is dropped"; else fail "health list: missing file is still listed" "$(cat "$list")"; fi
+if grep -qx '/usr/share/a' "$list" && grep -qx '/usr/share/b' "$list" && grep -qx '# list' "$list"; then ok "health list: files the image has (and comments) are kept"; else fail "health list: a present file or comment was lost" "$(cat "$list")"; fi
+if [ -f "$list.orig" ] && grep -q 'openssl.config' "$list.orig"; then ok "health list: the original is kept as .orig"; else fail "health list: no .orig copy"; fi
+if [ ! -e "$work/h/tak/health/takserver/critical_file_checksums.txt" ]; then ok "health list: stale checksums removed so they are made again"; else fail "health list: old checksum file left behind"; fi
+if [ ! -e "$work/h/tak/health/takserver-db/critical_file_list.txt.orig" ] && [ -f "$work/h/tak/health/takserver-db/critical_file_checksums.txt" ]; then ok "health list: a list with nothing missing is left alone"; else fail "health list: a complete list was changed"; fi
+if grep -q 'rc-nolist=0' "$work/rc"; then ok "health list: a bundle with no list is fine"; else fail "health list: a missing list made it fail"; fi
+
+#=== 4. the bundle named in the ZIP is used
+pick_fn=$(extract pick_tak_dir)
+# shellcheck disable=SC1090
+. "$pick_fn"
+command -v zip >/dev/null && command -v unzip >/dev/null || { fail "this check needs zip and unzip"; echo "$fails check(s) failed"; exit 1; }
+mkdir -p "$work/z/src/takserver-docker-5.8-RELEASE-1/tak" "$work/z/install/takserver-docker-hardened-5.8-RELEASE-9/tak"
+echo x > "$work/z/src/takserver-docker-5.8-RELEASE-1/tak/version.txt"
+( cd "$work/z/src" && zip -qr ../takserver-docker-5.8-RELEASE-1.zip takserver-docker-5.8-RELEASE-1 )
+# the install folder already holds a hardened bundle that sorts last, and now the standard ZIP is extracted beside it
+( cd "$work/z/install" && unzip -qo ../takserver-docker-5.8-RELEASE-1.zip )
+got=$(cd "$work/z/install" && pick_tak_dir "$work/z/takserver-docker-5.8-RELEASE-1.zip")
+if [ "$got" = "takserver-docker-5.8-RELEASE-1" ]; then ok "ZIP folder: picks the folder named in the ZIP, not the one that sorts last"; \
+else fail "ZIP folder: picked '$got' instead of takserver-docker-5.8-RELEASE-1"; fi
+# a ZIP with no top-level folder falls back to the old search
+mkdir -p "$work/z/flat/tak" "$work/z/install2/takserver-docker-hardened-5.8-RELEASE-9/tak"
+echo x > "$work/z/flat/tak/version.txt"
+( cd "$work/z/flat" && zip -qr ../flat.zip tak )
+got=$(cd "$work/z/install2" && pick_tak_dir "$work/z/flat.zip")
+if [ "$got" = "./takserver-docker-hardened-5.8-RELEASE-9" ]; then ok "ZIP folder: no top-level folder in the ZIP falls back to the search"; else fail "ZIP folder: fallback gave '$got'"; fi
+
+if [ "$fails" -gt 0 ]; then echo "$fails check(s) failed"; exit 1; fi
+echo "all checks passed"

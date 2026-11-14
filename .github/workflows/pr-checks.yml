@@ -130,10 +130,20 @@ jobs:
           persist-credentials: false
       - run: bash .github/ci/test_script_modes.sh
 
+  # The Docker install works for a normal user (sudo for ownership), keeps group 0 on the certs, prunes the health list and picks the ZIP's own bundle (ops #752).
+  docker-non-root:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: bash .github/ci/test_docker_non_root.sh
+
   # One stable name to require in branch protection. A failed or cancelled job fails it.
   checks-ok:
     if: always()
-    needs: [static, release-hygiene, docker-ports, docker-enrollment, docker-engine, docker-enable-enrollment, db-pgdg-repo, pgdg-key, caddy-key, script-modes]
+    needs: [static, release-hygiene, docker-ports, docker-enrollment, docker-engine, docker-enable-enrollment, db-pgdg-repo, pgdg-key, caddy-key, script-modes, docker-non-root]
     runs-on: ubuntu-24.04
     steps:
       - env:
