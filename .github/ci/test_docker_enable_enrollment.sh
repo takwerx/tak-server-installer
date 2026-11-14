@@ -90,6 +90,9 @@ case "$1" in
     shift   # the container
     case "$*" in
       keytool*) [ -z "${FAKE_KEYTOOL_FAIL:-}" ] || exit 1 ;;
+      stat*) echo "${FAKE_CERT_STATE:-1000 1000 755}" ;;                               # owner group mode of /opt/tak/certs/files
+      find*) [ -z "${FAKE_KEYS_CLOSED:-}" ] || echo "$FAKE_KEYS_CLOSED" ;;                # private keys with no group read
+      test\ -e*) f="$*"; f="${f#test -e }"; case " ${FAKE_MISSING:-} " in *" $f "*) exit 1 ;; esac ;;   # files the image does not ship
       *makeCert.sh*)
         [ -z "${FAKE_MAKECERT_FAIL:-}" ] || { echo "makeCert.sh: Permission denied"; exit 1; }
         name=$(echo "$*" | sed -n 's/.*makeCert\.sh ca \([^ "]*\).*/\1/p')
@@ -112,7 +115,7 @@ new_box() {   # a fresh fake install in $work/$1
   FAKE_LOG="$work/$1/docker.log"; : > "$FAKE_LOG"
   FAKE_NAMES="takserver-db-5.8-RELEASE-75 takserver-5.8-RELEASE-75"
   export FAKE_TAK FAKE_LOG FAKE_NAMES ENROLL_POLL_SECONDS=0
-  unset FAKE_KEYTOOL_FAIL FAKE_MAKECERT_FAIL FAKE_CODE FAKE_CODE_USER TAK_VERIFY_USER TAK_VERIFY_PASSWORD
+  unset FAKE_KEYTOOL_FAIL FAKE_MAKECERT_FAIL FAKE_CODE FAKE_CODE_USER TAK_VERIFY_USER TAK_VERIFY_PASSWORD FAKE_CERT_STATE FAKE_MISSING FAKE_KEYS_CLOSED
 }
 cnt() { grep -c -E -- "$2" "$work/$1/docker.log" || true; }
 run() { bash "$UPDATE" "$@" > "$work/out.txt" 2>&1; }
@@ -179,6 +182,50 @@ if [ "$rc" -ne 0 ] && cmp -s "$work/t8/original.xml" "$work/t8/tak/CoreConfig.xm
 new_box t9
 bash "$UPDATE" < <(echo n) > "$work/out.txt" 2>&1; rc=$?
 if [ "$rc" -ne 0 ] && cmp -s "$work/t9/original.xml" "$work/t9/tak/CoreConfig.xml" && [ "$(cnt t9 '^docker restart ')" -eq 0 ]; then ok "answering no at the question changes nothing"; else fail "answering no still changed something (exit $rc)"; fi
+
+# --- 6. what v1.0.2 also fixes for an old install (ops #753): the cert folder, and the health list. They run when enrollment is already on.
+mk_health() {   # a hardened-bundle health folder under box $1: both lists name a file the image does not ship
+  for n in takserver takserver-db; do
+    mkdir -p "$work/$1/tak/health/$n"
+    printf '# list\n/usr/share/a\n/usr/share/crypto-policies/back-ends/LEGACY/openssl.config\n/usr/share/b\n' > "$work/$1/tak/health/$n/critical_file_list.txt"
+    echo "old-sums" > "$work/$1/tak/health/$n/critical_file_checksums.txt"
+  done
+}
+new_box t10; mk_health t10
+cp "$work/t10/tak/CoreConfig.xml" "$work/t10/enrolled.xml"; enable_enrollment "$work/t10/tak/CoreConfig.xml" Acme-Root-Intermediate Acme Ops; cp "$work/t10/tak/CoreConfig.xml" "$work/t10/enrolled.xml"
+export FAKE_CERT_STATE="1000 1000 755" FAKE_MISSING="/usr/share/crypto-policies/back-ends/LEGACY/openssl.config"
+run --yes; rc=$?
+if [ "$rc" -eq 0 ] && cmp -s "$work/t10/enrolled.xml" "$work/t10/tak/CoreConfig.xml" && [ "$(cnt t10 'makeCert|^docker restart')" -eq 0 ]; then ok "enrollment already on: the script still runs, and changes neither CoreConfig.xml nor restarts anything"; else fail "an install with enrollment already on was changed or refused (exit $rc)" "$(tail -n 6 "$work/out.txt")"; fi
+if grep -qE 'exec -u root takserver-5\.8-RELEASE-75 bash -c chown -R 1000:0 /opt/tak/certs/files/ && chmod g\+rwx /opt/tak/certs/files/' "$work/t10/docker.log"; then ok "old install (certs/files 1000:1000 755): the folder is set to the same owner, group 0, group-writable"; else fail "certs/files was not set to 1000:0 with group write" "$(grep -E 'chown|stat' "$work/t10/docker.log")"; fi
+for n in takserver takserver-db; do
+  l="$work/t10/tak/health/$n/critical_file_list.txt"
+  if ! grep -q openssl.config "$l" && grep -qx '/usr/share/a' "$l" && grep -qx '/usr/share/b' "$l" && [ -f "$l.orig" ] && [ ! -e "$work/t10/tak/health/$n/critical_file_checksums.txt" ]; then ok "old install: the missing file is dropped from the $n health list, the rest kept, the original saved, stale checksums removed"; else fail "the $n health list was not pruned right" "$(cat "$l")"; fi
+done
+if grep -q 'exec takserver-db-5.8-RELEASE-75 test -e' "$work/t10/docker.log" && ! grep -qE 'restart takserver-db|docker (rm|stop|kill|volume)' "$work/t10/docker.log"; then ok "the database container is only asked whether files exist (no restart, no removal)"; else fail "the database container was touched" "$(grep takserver-db "$work/t10/docker.log")"; fi
+# a second run: nothing left to change
+cp -r "$work/t10/tak/health" "$work/t10/health-after1"; : > "$work/t10/docker.log"
+export FAKE_CERT_STATE="1000 0 775"
+run --yes; rc=$?
+if [ "$rc" -eq 0 ] && ! grep -q 'chown' "$work/t10/docker.log" && diff -r "$work/t10/health-after1" "$work/t10/tak/health" >/dev/null; then ok "a second run changes nothing (certs/files already 1000:0 775, lists already pruned)"; else fail "the second run changed something (exit $rc)" "$(cat "$work/t10/docker.log")"; fi
+# an install whose bundle has no health folder (5.6/5.7) is fine
+new_box t11; export FAKE_CERT_STATE="1000 1000 755"
+run --yes; rc=$?
+if [ "$rc" -eq 0 ] && ! grep -q 'test -e' "$work/t11/docker.log"; then ok "a bundle with no health folder (5.6/5.7): nothing to prune, no error"; else fail "no health folder made it fail or probe (exit $rc)"; fi
+# the intermediate CA made as root must not leave root-owned files: the folder is handed to the owner, group 0, AFTER makeCert.sh
+mc=$(grep -n 'makeCert\.sh ca' "$work/t11/docker.log" | head -n1 | cut -d: -f1)
+ch=$(grep -n 'chown -R 1000:0' "$work/t11/docker.log" | tail -n1 | cut -d: -f1)
+if [ -n "$mc" ] && [ -n "$ch" ] && [ "$ch" -gt "$mc" ] && ! grep -q 'chown -R 1000:1000' "$work/t11/docker.log"; then ok "after makeCert.sh as root, the new files go to the owner with group 0 (not back to 1000:1000)"; else fail "ownership after makeCert.sh is wrong" "$(grep -E 'makeCert|chown' "$work/t11/docker.log")"; fi
+# a folder that already has group 0 and group write, but private keys the container's group cannot read (the CA key: makeCert.sh then fails
+# with Permission denied and still exits 0): the keys get group read
+new_box t13; export FAKE_CERT_STATE="1000 0 775" FAKE_KEYS_CLOSED="/opt/tak/certs/files/ca-do-not-share.key"
+run --yes
+if grep -qE "chmod g\+rwx /opt/tak/certs/files/ && find /opt/tak/certs/files -maxdepth 1 -name '\*\.key' -exec chmod g\+r" "$work/t13/docker.log"; then ok "a folder with group write but a CA key the container's group cannot read is fixed (keys get group read)"; else fail "keys without group read were left alone" "$(grep -E 'chown|find' "$work/t13/docker.log")"; fi
+unset FAKE_KEYS_CLOSED
+# a root-owned folder (an install run as root) becomes 1000:0, as the installer does
+new_box t12; export FAKE_CERT_STATE="0 0 755"
+run --yes
+if grep -q 'chown -R 1000:0 /opt/tak/certs/files/' "$work/t12/docker.log"; then ok "a root-owned certs/files becomes 1000:0, as the installer does"; else fail "root-owned certs/files not handled" "$(grep chown "$work/t12/docker.log")"; fi
+unset FAKE_CERT_STATE FAKE_MISSING
 
 [ "$fails" -eq 0 ] && echo "all docker enable-enrollment checks passed" || echo "$fails docker enable-enrollment check(s) failed"
 [ "$fails" -eq 0 ]

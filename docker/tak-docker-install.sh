@@ -776,9 +776,11 @@ log "Both containers running"
 # when one is missing. That list names /usr/share/crypto-policies/back-ends/*/openssl.config, which the current
 # UBI 10 crypto-policies package no longer ships, so both containers stay "unhealthy" although they work.
 # Drop entries that do not exist inside the container; the rest are still checked. Older bundles have no list.
-# (From tranzmatt, PR #30.)
+# Arguments: CONTAINER NAME [TAK_FOLDER, default tak]. When this user cannot write the list (an install made by root),
+# the changes go through as_root. The same function is in docker/tak-docker-enable-enrollment.sh, for installs made
+# before v1.0.2 (the CI check test_docker_non_root.sh fails if the two copies differ). (From tranzmatt, PR #30.)
 prune_health_list() {
-    local container="$1" list="tak/health/$2/critical_file_list.txt" kept removed=0 line
+    local container="$1" list="${3:-tak}/health/$2/critical_file_list.txt" kept removed=0 line root=""
     [ -f "$list" ] || return 0
     kept=$(mktemp)
     while IFS= read -r line || [ -n "$line" ]; do
@@ -792,9 +794,10 @@ prune_health_list() {
         fi
     done < "$list"
     if [ "$removed" -gt 0 ]; then
-        cp "$list" "${list}.orig"
-        cat "$kept" > "$list"
-        rm -f "tak/health/$2/critical_file_checksums.txt"
+        { [ -w "$list" ] && [ -w "$(dirname "$list")" ]; } || root="as_root"
+        $root cp "$list" "${list}.orig"
+        $root tee "$list" < "$kept" > /dev/null
+        $root rm -f "$(dirname "$list")/critical_file_checksums.txt"
         warn "Health check: removed ${removed} file(s) missing from ${container} from $list (original kept as ${list}.orig)"
     fi
     rm -f "$kept"
@@ -859,11 +862,13 @@ step "13: Fix File Permissions"
 
 # Hand the cert files to the host user so they can be copied off the box, but keep group 0: the 5.8 hardened
 # container runs as tak (uid 1001) in group 0 and must still write here to make more certs (makeCert.sh).
-# Group write goes on the folder only, so the private keys keep the owner-only mode makeCert.sh gives them.
+# Group write goes on the folder only. The private keys get group read (mode 640), because makeCert.sh in that container
+# must read the CA key to sign a certificate (with the owner-only mode it fails with "Permission denied" and still exits 0).
+# Group 0 on the host is root only, so no other host user can read the keys. (ops #753)
 CERT_UID=$(id -u)
 [ "$CERT_UID" -eq 0 ] && CERT_UID=1000
 $DOCKER exec -u root "$TAK_CONTAINER" bash -c \
-    "chown -R ${CERT_UID}:0 /opt/tak/certs/files/ && chmod g+rwx /opt/tak/certs/files/"
+    "chown -R ${CERT_UID}:0 /opt/tak/certs/files/ && chmod g+rwx /opt/tak/certs/files/ && find /opt/tak/certs/files -maxdepth 1 -name '*.key' -exec chmod g+r {} +"
 
 log "File permissions fixed (${CERT_UID}:0)"
 
