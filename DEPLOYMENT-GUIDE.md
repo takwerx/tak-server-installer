@@ -422,6 +422,34 @@ To prove enrollment works, add `--verify-user NAME` with an existing TAK user. T
 
 To undo it: `cp tak/CoreConfig.xml.before-enrollment-<date> tak/CoreConfig.xml && docker restart takserver-<VERSION>`.
 
+### Database image and PostgreSQL updates
+
+PostgreSQL ships bug and security fixes as new minor versions (for example 15.20 and 18.7). The installer builds the TAK Server database image **once**, at install time, so a Docker install keeps the PostgreSQL version it was built with until you rebuild the image. Running the installer again does not help: it stops at the existing database container on purpose, because a re-run would delete the data.
+
+Get the new scripts (`git pull`), then run this on the machine that runs TAK Server:
+
+```
+./docker/tak-docker-update-db.sh
+```
+
+What it does:
+
+1. Rebuilds the database image from the bundle you installed with (`--pull --no-cache`, so it takes the newest base image and PostgreSQL packages). TAK Server keeps running during the build, which takes a few minutes.
+2. Compares versions. If the rebuilt image has the same PostgreSQL as the running database it says `Already up to date` and changes nothing. PostgreSQL publishes new minor versions often: run the script now and then, and after each release.
+3. Writes a full backup (`tak-db-backup-<version>-<date>.sql`, readable by its owner only) next to the `tak` folder.
+4. Stops TAK Server and the database, keeps the old database container and image under new names, and starts a new database container from the new image on the same data (the same mounted folder, network and loopback-only port 5432). TAK Server is down for about 2 to 5 minutes. Clients reconnect on their own.
+5. Checks that the database reports the new version, has the same tables and at least the same rows, and that TAK Server holds a connection to it. If any check fails it puts the old container and image back and starts them.
+
+It asks once before stopping TAK Server; `--yes` skips the question and `--force` swaps even when the version is the same. When you are sure all is well (a few days), free the space with the two commands it prints (`docker rm ...` and `docker rmi ...`). The data is not copied: the new container uses the same data folder, and a PostgreSQL minor version reads the same data as the one before.
+
+It changes nothing, and says so, when:
+
+- the data lives **inside** the database container (standard 5.6/5.7 bundles): a new container would start empty. Take a backup with `docker exec -u postgres takserver-db-<VERSION> pg_dumpall > tak-db-backup.sql` and keep the install as it is. A tested update path for these installs is not available yet.
+- the install was made with **Docker Compose**: Compose would put the old container back. Rebuild the image with `docker build --pull --no-cache` from the bundle folder and recreate the `takserver-db` service by hand, keeping the data volume.
+- the bundle folder (with `docker/` and `tak/`) is gone: unzip the TAK Server ZIP again in the same place.
+
+New installs need nothing: the installer now builds the database image with `--pull --no-cache`, so a re-install never reuses an old base image or old layers.
+
 ### Database port (5432)
 
 TAK Server reaches PostgreSQL over the Docker network (`tak-database`), so the database port only needs to be reachable from the host itself. The script and Compose file publish it on **`127.0.0.1:5432`** only. Docker-published ports bypass `ufw`/`firewalld`, so don't rely on the host firewall to keep 5432 closed.
@@ -1208,6 +1236,24 @@ VPS Provider:
 - Use private networking
 - Configure snapshots/backups
 - Enable monitoring
+
+### Keeping PostgreSQL up to date (Ubuntu script installs)
+
+The Ubuntu script installs PostgreSQL from the PostgreSQL project's own apt repository (PGDG), not from Ubuntu. TAK Server 5.8 uses PostgreSQL 18. PostgreSQL ships bug and security fixes as new minor versions (for example 18.7).
+
+Ubuntu's automatic updates (`unattended-upgrades`) cover only Ubuntu's own packages and security updates. They do **not** cover the PostgreSQL repository, so these fixes reach your server only when you install them. Do it now and then, and after each PostgreSQL release:
+
+```bash
+sudo apt-get update
+apt list --upgradable 2>/dev/null | grep -i postgres      # what is newer
+sudo apt-get install --only-upgrade 'postgresql*'          # only the PostgreSQL packages that are already installed
+sudo -u postgres psql -tAc "show server_version"           # the new version
+```
+
+PostgreSQL restarts during the upgrade. On the test server (TAK Server 5.8, PostgreSQL 18.6 to 18.7) the database was away for about 5 seconds, TAK Server stayed running and reconnected by itself, and no restart was needed. Pick a quiet time anyway: clients that send data at that moment can see a short pause.
+
+Other packages stay as they are: this does not run a full `apt upgrade`. The TAK Server package itself is not updated by it; TAK Server updates come from tak.gov.
+
 
 ## SECTION 6: TESTING GUARD DOGS
 

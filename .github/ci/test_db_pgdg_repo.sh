@@ -122,7 +122,7 @@ else fail "step: changed a repo that is not PGDG's"; fi
 # --- the install script builds the DB image from the patched copy
 patch_at=$(grep -n -m1 -E '^[[:space:]]+if pgdg_major_patch "\$DB_DOCKERFILE"' "$INSTALL" | cut -d: -f1)
 use_at=$(grep -n -m1 -E '^[[:space:]]+DB_DOCKERFILE="\$PGDG_DOCKERFILE"' "$INSTALL" | cut -d: -f1)
-build_at=$(grep -n -m1 -E '^\$DOCKER build -t takserver-db:"\$\{VERSION\}" -f "\$DB_DOCKERFILE"' "$INSTALL" | cut -d: -f1)
+build_at=$(grep -n -m1 -E '^\$DOCKER build --pull --no-cache -t takserver-db:"\$\{VERSION\}" -f "\$DB_DOCKERFILE"' "$INSTALL" | cut -d: -f1)
 if [ -n "$patch_at" ] && [ -n "$use_at" ] && [ -n "$build_at" ] && [ "$patch_at" -lt "$use_at" ] && [ "$use_at" -lt "$build_at" ]; then
   ok "install script: patches the DB Dockerfile and builds the patched copy"
 else fail "install script: the DB image build does not use the PGDG-patched Dockerfile (patch ${patch_at:-none}, use ${use_at:-none}, build ${build_at:-none})"; fi
