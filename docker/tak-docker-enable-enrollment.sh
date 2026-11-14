@@ -21,7 +21,8 @@
 #   - the 5.8 hardened health check lists a file the image does not ship, so docker ps shows both containers "(unhealthy)" while TAK
 #     Server works. Entries missing from the image are dropped from tak/health/*/critical_file_list.txt (a copy is kept as .orig).
 #
-# Run it on the machine that runs the containers, from a copy of this repo:   ./docker/tak-docker-enable-enrollment.sh
+# Run it on the machine that runs the containers, from a copy of this repo:   sudo ./docker/tak-docker-enable-enrollment.sh
+# (use sudo: an install made with sudo has a tak/ folder that belongs to root, and a normal user cannot change CoreConfig.xml there)
 #   --yes              do not ask before restarting TAK Server
 #   --container NAME   the TAK Server container (only needed when there is more than one)
 #   --verify-user NAME ask for that existing TAK user's password (not saved) and prove enrollment: 8446 must answer HTTP 200
@@ -235,6 +236,15 @@ main() {
             log "To confirm sign-in works, run this again with --verify-user NAME (an existing TAK user)."
         fi
         return 0
+    fi
+
+    # --- CoreConfig.xml must be writable before anything is changed. An install made with sudo has a root-owned tak/ folder: as a normal user
+    # the backup copy fails halfway with a bare "Permission denied". Stop here instead, before the intermediate CA is made, and say what to do.
+    if [ "$(id -u)" -ne 0 ] && { [ ! -w "$CFG" ] || [ ! -w "$TAK_DIR" ]; }; then
+        err "This user cannot change $CFG. The tak folder belongs to another user, probably root, because the install was made with sudo."
+        echo "  Nothing was changed in CoreConfig.xml and TAK Server was not restarted. Run the script again with sudo:" >&2
+        echo "      sudo ./docker/tak-docker-enable-enrollment.sh" >&2
+        return 1
     fi
 
     # --- names from the root CA this install already has
