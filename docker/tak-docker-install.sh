@@ -176,6 +176,20 @@ if [ "$NEED_DOCKER" -eq 1 ]; then
 fi
 log "Docker: $(docker --version)"
 
+# BEGIN ram_check
+# Warn (never stop) when the machine has under 8 GB of RAM: TAK Server runs several JVMs beside PostgreSQL
+# and a small machine tends to run out of memory. MemTotal reads a bit under the sticker size, so the
+# limit is 7,500,000 kB. MEMINFO can point at another file (the CI check does).
+ram_check() {
+    local mem_kb
+    mem_kb=$(awk '/^MemTotal:/ {print $2}' "${MEMINFO:-/proc/meminfo}" 2>/dev/null)
+    if [ "${mem_kb:-0}" -gt 0 ] && [ "$mem_kb" -lt 7500000 ]; then
+        warn "Only $((mem_kb / 1024)) MB of RAM. TAK Server needs 8 GB or more and may fail to start or be stopped for lack of memory."
+    fi
+}
+# END ram_check
+ram_check
+
 # Check we can run docker without sudo
 if ! docker info &>/dev/null; then
     warn "Cannot run docker without sudo. Trying with sudo for this session..."
