@@ -457,60 +457,11 @@ step "6: Build TAK Server Database Image"
 
 log "Building takserver-db:${VERSION} ..."
 
-# Find the right Dockerfile - check in order of preference for ARM64
-ARCH=$(dpkg --print-architecture 2>/dev/null || uname -m)
-
-if [[ "$ARCH" == "arm64" || "$ARCH" == "aarch64" ]]; then
-    for df in \
-        "docker/Dockerfile.takserver-db-arm" \
-        "docker/Dockerfile.takserver-db.arm64" \
-        "docker/Dockerfile.hardened-takserver-db" \
-        "docker/Dockerfile.takserver-db"; do
-        if [ -f "$df" ]; then
-            DB_DOCKERFILE="$df"
-            break
-        fi
-    done
-else
-    for df in \
-        "docker/Dockerfile.hardened-takserver-db" \
-        "docker/Dockerfile.takserver-db"; do
-        if [ -f "$df" ]; then
-            DB_DOCKERFILE="$df"
-            break
-        fi
-    done
-fi
-
-if [ -z "$DB_DOCKERFILE" ]; then
-    err "No database Dockerfile found in docker/"
-    ls docker/
-    exit 1
-fi
-
-log "Using Dockerfile: ${DB_DOCKERFILE}"
-
-# Hardened 5.8 bundles read ARG TARGETARCH, which the legacy builder leaves empty.
-if [ "$HAVE_BUILDX" -eq 0 ] && grep -Eq '^[[:space:]]*ARG[[:space:]]+TARGETARCH' "$DB_DOCKERFILE"; then
-    err "This TAK Server bundle needs Docker BuildKit (docker buildx) to detect the CPU type, and it is not installed."
-    echo "  Ubuntu/Debian: sudo apt-get install docker-buildx"
-    echo "  RHEL/Rocky:    sudo dnf install docker-buildx-plugin (Docker's own repo)"
-    echo "  Then re-run this script."
-    exit 1
-fi
-
-# postgres:15 / 15.x / 15[.x]-bullseye no longer build (see DB_BASE_IMAGE above).
-# Build from a patched copy; the bundle's own Dockerfile is left untouched.
-OLD_BASE_RE='^([Ff][Rr][Oo][Mm][[:space:]]+)((docker\.io/)?(library/)?postgres:15(\.[0-9]+)*(-bullseye)?)([[:space:]]|$)'
-if [ -n "$DB_BASE_IMAGE" ] && grep -Eq "$OLD_BASE_RE" "$DB_DOCKERFILE"; then
-    OLD_BASE=$(grep -E "$OLD_BASE_RE" "$DB_DOCKERFILE" | head -1 | awk '{print $2}')
-    PATCHED_DOCKERFILE="${DB_DOCKERFILE}.patched"
-    sed -E "s#${OLD_BASE_RE}#\1${DB_BASE_IMAGE}\7#" "$DB_DOCKERFILE" > "$PATCHED_DOCKERFILE"
-    warn "DB image base ${OLD_BASE} no longer builds (retired apt repo); using ${DB_BASE_IMAGE} (same PostgreSQL 15)"
-    log "Patched copy: ${PATCHED_DOCKERFILE} (original unchanged)"
-    DB_DOCKERFILE="$PATCHED_DOCKERFILE"
-fi
-
+# BEGIN db_dockerfile
+# Picks the bundle's DB Dockerfile and writes the patched copies the DB image is built from. Used by this script (step 6) and by
+# docker/tak-docker-update-db.sh, which rebuilds the DB image on an existing install; the CI check .github/ci/test_docker_update_db.sh
+# fails if the two copies differ. Run from the extracted bundle folder (where docker/ and tak/ are). The functions use log, warn, err.
+DB_BASE_IMAGE="${DB_BASE_IMAGE-postgres:15-bookworm}"
 # >>> pgdg-major (ops #702; tested by .github/ci/test_db_pgdg_repo.sh)
 # The 5.8 hardened DB image starts FROM ubi10/ubi:10.2, but its own "dnf update" moves it to the newest RHEL minor
 # (10.3 since Nov 2026). PGDG's repo file reads baseurl=.../redhat/rhel-$releasever_major.$releasever_minor-$basearch
@@ -539,19 +490,89 @@ pgdg_major_patch() {
         END { exit (n ? 0 : 1) }' "$1" > "$2"
 }
 # <<< pgdg-major
-if ! grep -qF "$PGDG_MAJOR_MARK" "$DB_DOCKERFILE"; then
-    PGDG_DOCKERFILE="${DB_DOCKERFILE%.patched}.patched"
-    if pgdg_major_patch "$DB_DOCKERFILE" "${PGDG_DOCKERFILE}.tmp"; then
-        mv -f "${PGDG_DOCKERFILE}.tmp" "$PGDG_DOCKERFILE"
-        warn "PostgreSQL repos in the DB image use the RHEL major version (PGDG has no folder yet for the newest RHEL minor)."
-        log "Patched copy: ${PGDG_DOCKERFILE} (original unchanged)"
-        DB_DOCKERFILE="$PGDG_DOCKERFILE"
+
+# Sets DB_DOCKERFILE to the bundle's own DB Dockerfile (the first that exists, ARM64 first on ARM). Returns 1 if there is none.
+select_db_dockerfile() {
+    local df
+    DB_DOCKERFILE=""
+    ARCH=$(dpkg --print-architecture 2>/dev/null || uname -m)
+
+    if [[ "$ARCH" == "arm64" || "$ARCH" == "aarch64" ]]; then
+        for df in \
+            "docker/Dockerfile.takserver-db-arm" \
+            "docker/Dockerfile.takserver-db.arm64" \
+            "docker/Dockerfile.hardened-takserver-db" \
+            "docker/Dockerfile.takserver-db"; do
+            if [ -f "$df" ]; then
+                DB_DOCKERFILE="$df"
+                break
+            fi
+        done
     else
-        rm -f "${PGDG_DOCKERFILE}.tmp"
+        for df in \
+            "docker/Dockerfile.hardened-takserver-db" \
+            "docker/Dockerfile.takserver-db"; do
+            if [ -f "$df" ]; then
+                DB_DOCKERFILE="$df"
+                break
+            fi
+        done
     fi
+
+    if [ -z "$DB_DOCKERFILE" ]; then
+        err "No database Dockerfile found in docker/"
+        ls docker/
+        return 1
+    fi
+
+    log "Using Dockerfile: ${DB_DOCKERFILE}"
+}
+
+# The standard 5.6/5.7 bundles build the DB image FROM postgres:15.1 (Debian bullseye), whose apt repo is retired, so that build fails.
+# The base swap and the PGDG fix go into patched copies; the bundle's own Dockerfile is left untouched. Updates DB_DOCKERFILE.
+patch_db_dockerfile() {
+    # postgres:15 / 15.x / 15[.x]-bullseye no longer build (see DB_BASE_IMAGE above).
+    # Build from a patched copy; the bundle's own Dockerfile is left untouched.
+    OLD_BASE_RE='^([Ff][Rr][Oo][Mm][[:space:]]+)((docker\.io/)?(library/)?postgres:15(\.[0-9]+)*(-bullseye)?)([[:space:]]|$)'
+    if [ -n "$DB_BASE_IMAGE" ] && grep -Eq "$OLD_BASE_RE" "$DB_DOCKERFILE"; then
+        OLD_BASE=$(grep -E "$OLD_BASE_RE" "$DB_DOCKERFILE" | head -1 | awk '{print $2}')
+        PATCHED_DOCKERFILE="${DB_DOCKERFILE}.patched"
+        sed -E "s#${OLD_BASE_RE}#\1${DB_BASE_IMAGE}\7#" "$DB_DOCKERFILE" > "$PATCHED_DOCKERFILE"
+        warn "DB image base ${OLD_BASE} no longer builds (retired apt repo); using ${DB_BASE_IMAGE} (same PostgreSQL 15)"
+        log "Patched copy: ${PATCHED_DOCKERFILE} (original unchanged)"
+        DB_DOCKERFILE="$PATCHED_DOCKERFILE"
+    fi
+
+    if ! grep -qF "$PGDG_MAJOR_MARK" "$DB_DOCKERFILE"; then
+        PGDG_DOCKERFILE="${DB_DOCKERFILE%.patched}.patched"
+        if pgdg_major_patch "$DB_DOCKERFILE" "${PGDG_DOCKERFILE}.tmp"; then
+            mv -f "${PGDG_DOCKERFILE}.tmp" "$PGDG_DOCKERFILE"
+            warn "PostgreSQL repos in the DB image use the RHEL major version (PGDG has no folder yet for the newest RHEL minor)."
+            log "Patched copy: ${PGDG_DOCKERFILE} (original unchanged)"
+            DB_DOCKERFILE="$PGDG_DOCKERFILE"
+        else
+            rm -f "${PGDG_DOCKERFILE}.tmp"
+        fi
+    fi
+}
+# END db_dockerfile
+
+select_db_dockerfile || exit 1
+
+# Hardened 5.8 bundles read ARG TARGETARCH, which the legacy builder leaves empty.
+if [ "$HAVE_BUILDX" -eq 0 ] && grep -Eq '^[[:space:]]*ARG[[:space:]]+TARGETARCH' "$DB_DOCKERFILE"; then
+    err "This TAK Server bundle needs Docker BuildKit (docker buildx) to detect the CPU type, and it is not installed."
+    echo "  Ubuntu/Debian: sudo apt-get install docker-buildx"
+    echo "  RHEL/Rocky:    sudo dnf install docker-buildx-plugin (Docker's own repo)"
+    echo "  Then re-run this script."
+    exit 1
 fi
 
-$DOCKER build -t takserver-db:"${VERSION}" -f "$DB_DOCKERFILE" .
+patch_db_dockerfile
+
+# --pull --no-cache: build on the newest base image and the newest PostgreSQL packages, never on layers a rebuild kept from an
+# earlier install (a PostgreSQL minor release reached new installs only this way, ops #756).
+$DOCKER build --pull --no-cache -t takserver-db:"${VERSION}" -f "$DB_DOCKERFILE" .
 
 log "Database image built"
 
