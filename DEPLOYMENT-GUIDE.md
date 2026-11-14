@@ -424,6 +424,20 @@ To prove enrollment works, add `--verify-user NAME` with an existing TAK user. T
 
 To undo it: `cp tak/CoreConfig.xml.before-enrollment-<date> tak/CoreConfig.xml && docker restart takserver-<VERSION>`.
 
+### Stopping and starting a Docker install
+
+Stop the install with this script, from a copy of this repo, on the machine that runs TAK Server:
+
+```
+./docker/tak-docker-stop.sh
+```
+
+It stops TAK Server, shuts PostgreSQL down the proper way (`pg_ctl stop -m fast`), and then stops the database container. Start the install again with `docker start takserver-db-<VERSION> takserver-<VERSION>` (the installer prints this line). Use `--container NAME` if the machine has more than one TAK Server container.
+
+Why not a plain `docker stop`? The TAK Server database image runs `tail -f /dev/null` as its main process, and that ignores the stop signal. Docker waits its timeout (10 seconds) and then kills the container, and PostgreSQL goes down without a clean shutdown. At the next start the PostgreSQL log says `database system was not properly shut down; automatic recovery in progress`. On a small database the recovery takes about a second and nothing is lost. On a big or busy database it takes longer. A reboot does the same, because the containers have no restart policy and Docker kills them when the machine goes down. Before a planned reboot, run the script first.
+
+If you did stop the install the plain way, nothing is broken: start it with `docker start` and PostgreSQL recovers by itself. `tak-docker-update-db.sh` stops the database cleanly on its own.
+
 ### Database image and PostgreSQL updates
 
 PostgreSQL ships bug and security fixes as new minor versions (for example 15.20 and 18.7). The installer builds the TAK Server database image **once**, at install time, so a Docker install keeps the PostgreSQL version it was built with until you rebuild the image. Running the installer again does not help: it stops at the existing database container on purpose, because a re-run would delete the data.
@@ -482,7 +496,7 @@ Run everything from the extracted ZIP directory (where `tak/` is). The snapshot 
    **Script install:**
 
    ```bash
-   docker stop takserver-$VERSION takserver-db-$VERSION
+   ~/tak-server-installer/docker/tak-docker-stop.sh
    docker commit takserver-db-$VERSION takserver-db-data:$VERSION
    docker rm takserver-db-$VERSION
    docker run -d -it \
