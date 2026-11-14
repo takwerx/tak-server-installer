@@ -158,9 +158,19 @@ run --yes; rc=$?
 if [ "$rc" -ne 0 ] && cmp -s "$work/t2/original.xml" "$work/t2/tak/CoreConfig.xml" && [ "$(cnt t2 '^docker restart ')" -eq 2 ]; then ok "if 8446 does not come back, the old CoreConfig.xml is restored and TAK Server restarts again"; else fail "no rollback after a bad restart (exit $rc, restarts $(cnt t2 '^docker restart '))"; fi
 
 # --- 4. with a verify user, only HTTP 200 counts: a 401 for that user is a failure and rolls back
+# A 401 for the user is "unknown user or wrong password" (TAK Server also answers 401 without a working enrollment only when no login is sent),
+# so it must NOT undo enrollment (ops #761). It keeps the new config, restarts once, and says what to check. A 500 (CertificateSigning missing)
+# or no answer still rolls back.
 new_box t3; export FAKE_CODE_USER=401 TAK_VERIFY_PASSWORD=pw
+run --yes --verify-user nobody; rc=$?
+if [ "$rc" -eq 0 ] && has_active_enrollment "$work/t3/tak/CoreConfig.xml" && [ "$(cnt t3 '^docker restart ')" -eq 1 ]; then ok "--verify-user: a 401 for the user keeps enrollment on (one restart, no rollback)"; else fail "--verify-user with a 401 undid enrollment or failed (exit $rc, restarts $(cnt t3 '^docker restart '))" "$(tail -n 5 "$work/out.txt")"; fi
+if grep -q 'answered 401 for nobody' "$work/out.txt" && grep -q 'check the user name and password' "$work/out.txt" && grep -q 'enrollment itself is on' "$work/out.txt" && ! grep -qiE 'enrollment works|sign-in .*is on' "$work/out.txt"; then ok "--verify-user: the 401 message names the user, says to check user name and password, says enrollment is on, and does not claim it is proven"; else fail "the 401 message is wrong" "$(tail -n 8 "$work/out.txt")"; fi
+new_box t3b; export FAKE_CODE_USER=500 TAK_VERIFY_PASSWORD=pw
 run --yes --verify-user bob; rc=$?
-if [ "$rc" -ne 0 ] && cmp -s "$work/t3/original.xml" "$work/t3/tak/CoreConfig.xml"; then ok "--verify-user: a 401 for the user is a failure and rolls back"; else fail "--verify-user accepted a 401 (exit $rc)"; fi
+if [ "$rc" -ne 0 ] && cmp -s "$work/t3b/original.xml" "$work/t3b/tak/CoreConfig.xml" && [ "$(cnt t3b '^docker restart ')" -eq 2 ]; then ok "--verify-user: a 500 for the user (CertificateSigning missing) still rolls back"; else fail "--verify-user with a 500 did not roll back (exit $rc)"; fi
+new_box t3c; export FAKE_CODE_USER=000 TAK_VERIFY_PASSWORD=pw
+run --yes --verify-user bob; rc=$?
+if [ "$rc" -ne 0 ] && cmp -s "$work/t3c/original.xml" "$work/t3c/tak/CoreConfig.xml"; then ok "--verify-user: no answer from 8446 still rolls back"; else fail "--verify-user with no answer did not roll back (exit $rc)"; fi
 new_box t4; export FAKE_CODE_USER=200 TAK_VERIFY_PASSWORD=pw
 run --yes --verify-user bob; rc=$?
 if [ "$rc" -eq 0 ] && grep -q 'answers HTTP 200 for bob' "$work/out.txt"; then ok "--verify-user: HTTP 200 for the user is the pass, and the output says so"; else fail "--verify-user with a 200 did not pass (exit $rc)" "$(tail -n 4 "$work/out.txt")"; fi
