@@ -401,7 +401,7 @@ docker ps --format '{{.Names}}\t{{.Ports}}'          # want 8444, 9000, 9001 sho
 sudo iptables -S TAK-DOCKER-FW                       # want RETURN for 8089, 8443, 8446, then DROP
 ```
 
-### Installed with v1.0.1 or older? Turn on ATAK sign-in (port 8446)
+### Installed with v1.0.1 or older? Turn on ATAK sign-in (port 8446) and fix certificates and health
 
 Docker installs made with an installer older than v1.0.2 have no certificate enrollment set up. ATAK users who type the server address, a username and a password get no certificate (8446 answers HTTP 500). Running `tak-docker-install.sh` again does not fix it: it stops at the existing database container and changes nothing, on purpose, because a re-run would delete the data.
 
@@ -413,7 +413,12 @@ Get the new scripts (`git pull`), then run this on the machine that runs TAK Ser
 
 It makes an intermediate signing CA under your root CA, adds the `certificateSigning` block to `tak/CoreConfig.xml` (the old file is kept beside it, with the date in its name) and restarts the TAK Server container, which takes about a minute. The database, users, existing certificates and ports are not changed, and `ca.pem` stays your root CA, so certificates you make later with `makeCert.sh` are signed as before. If TAK Server does not come back, the script puts the old `CoreConfig.xml` back and restarts it again.
 
-To prove it works, add `--verify-user NAME` with an existing TAK user. The script asks for that user's password (it is not saved) and checks that 8446 answers HTTP 200 for it. Without that option, sign in once from an ATAK device. Running the script a second time changes nothing.
+The same script also brings an old Docker install in line with v1.0.2 in two more ways. It does them whether or not enrollment is already on, and they need no restart:
+
+- **Certificates made inside the container.** `tak/certs/files` gets group 0 and group write, and the private keys get group read (the folder keeps the same owner). Before, `docker exec <container> bash -c "cd /opt/tak/certs && ./makeCert.sh client NAME"` printed `Permission denied` and made no `.p12`, although it ended with exit code 0. Always check that `NAME.p12` is there. Group 0 on the host is root only, so other users on the machine still cannot read the keys.
+- **`(unhealthy)` in `docker ps`.** The 5.8 hardened health check also lists a system file that the image no longer has, so both containers stayed `(unhealthy)` while TAK Server worked. The script removes the missing entries from `tak/health/*/critical_file_list.txt` (the original is kept as `critical_file_list.txt.orig`). `docker ps` shows `(healthy)` within a minute or two.
+
+To prove enrollment works, add `--verify-user NAME` with an existing TAK user. The script asks for that user's password (it is not saved) and checks that 8446 answers HTTP 200 for it. Without that option, sign in once from an ATAK device. Running the script a second time changes nothing.
 
 To undo it: `cp tak/CoreConfig.xml.before-enrollment-<date> tak/CoreConfig.xml && docker restart takserver-<VERSION>`.
 
