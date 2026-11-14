@@ -46,10 +46,24 @@ jobs:
       - run: bash .github/ci/test_release_hygiene.sh
       - run: bash .github/ci/release_hygiene.sh
 
+  # The Docker install publishes only the ports it needs, and the firewall helper allows only those (ops #624).
+  docker-ports:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - run: pip install pyyaml
+      - run: bash .github/ci/test_docker_ports.sh
+
   # One stable name to require in branch protection. A failed or cancelled job fails it.
   checks-ok:
     if: always()
-    needs: [static, release-hygiene]
+    needs: [static, release-hygiene, docker-ports]
     runs-on: ubuntu-24.04
     steps:
       - env:

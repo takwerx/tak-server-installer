@@ -302,7 +302,7 @@ What the guide expects at a high level (matches `docker/tak-docker-install.sh`):
 3. `docker network create takserver-"$(cat tak/version.txt)"`.
 4. `docker run` the DB container with **`--network-alias tak-database`** (Compose in this repo uses the same alias on a user-defined network).
 5. `docker build` for **`takserver`** using `docker/Dockerfile.takserver`.
-6. `docker run` the TAK Server container with the published ports (8089, 8443, 8444, 8446, 9000, 9001 by default).
+6. `docker run` the TAK Server container with the published ports (8089, 8443, 8446 open; 8444, 9000, 9001 on this machine only unless you turn federation on, see [Published ports](#published-ports-and-the-docker-firewall)).
 7. Configure **`tak/certs/cert-metadata.sh`**, generate CA and certs inside the container, then **`./configureInDocker.sh`**, tail **`tak/logs/`** from the host, and run **UserManager** to authorize the admin client PEM.
 
 For the newest PDF, always check [TAK.gov](https://tak.gov) in case the bundled copy is behind your deployment.
@@ -393,6 +393,33 @@ docker logs -f takserver-$(cat tak/version.txt)
 ```
 
 Web UI: `https://YOUR-IP:8443` (import `admin.p12` as with native install).
+
+### Published ports and the Docker firewall
+
+Docker-published ports bypass `ufw`/`firewalld`. The script therefore opens only what clients and admins use and keeps the rest on this machine:
+
+| Port | Use | Default |
+|------|-----|---------|
+| 8089 | TLS client connections | open |
+| 8443 | Admin web UI (needs a client certificate) | open |
+| 8446 | Certificate enrollment | open |
+| 8444, 9000, 9001 | Federation | this machine only |
+| 5432 | Database | this machine only |
+
+To use federation, set `FEDERATION_PORTS=true` at the top of `docker/tak-docker-install.sh` and run it again. With Compose, set `TAK_FED_BIND=0.0.0.0` before `docker compose up -d`.
+
+The script also installs `docker/tak-docker-firewall.sh` as the `tak-docker-firewall` service. It adds a rule set to Docker's `DOCKER-USER` chain that drops new connections from outside to any published port you did not list, and it comes back after a reboot or a Docker restart. With Compose, install it yourself, listing the ports to keep open:
+
+```bash
+sudo ./docker/tak-docker-firewall.sh persist 8089 8443 8446
+```
+
+**Check an install** (run on the TAK host):
+
+```bash
+docker ps --format '{{.Names}}\t{{.Ports}}'          # want 8444, 9000, 9001 shown as 127.0.0.1:...
+sudo iptables -S TAK-DOCKER-FW                       # want RETURN for 8089, 8443, 8446, then DROP
+```
 
 ### Database port (5432)
 
