@@ -341,6 +341,8 @@ chmod +x ~/tak-server-installer/docker/tak-docker-install.sh
 ~/tak-server-installer/docker/tak-docker-install.sh
 ```
 
+The ZIP can stay where it is: give the script its path instead of copying it (`~/tak-server-installer/docker/tak-docker-install.sh ~/Downloads/takserver-docker-hardened-5.8-RELEASE-75.zip`, or set `TAK_ZIP=` to the path). The script extracts it into `~/tak-docker/`.
+
 The script:
 
 1. Installs Docker if missing (apt or dnf), configures `CoreConfig.xml` and `cert-metadata.sh`, builds `takserver-db` and `takserver` images, runs containers, generates certificates, and promotes the admin client.
