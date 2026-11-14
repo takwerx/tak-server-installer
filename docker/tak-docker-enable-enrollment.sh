@@ -15,6 +15,12 @@
 #   3. restarts the TAK Server container (about a minute) and checks that 8446 answers; if it does not, it puts the old
 #      CoreConfig.xml back and restarts again
 #
+# It also brings an old install in line with v1.0.2 in two more ways (they run even when enrollment is already on, and are safe to repeat):
+#   - certs/files gets group 0 and group write, so "./makeCert.sh client NAME" run as the container's own user works (it fails on installs
+#     made before v1.0.2). The owner stays; keys keep their owner-only mode.
+#   - the 5.8 hardened health check lists a file the image does not ship, so docker ps shows both containers "(unhealthy)" while TAK
+#     Server works. Entries missing from the image are dropped from tak/health/*/critical_file_list.txt (a copy is kept as .orig).
+#
 # Run it on the machine that runs the containers, from a copy of this repo:   ./docker/tak-docker-enable-enrollment.sh
 #   --yes              do not ask before restarting TAK Server
 #   --container NAME   the TAK Server container (only needed when there is more than one)
@@ -42,6 +48,74 @@ enable_enrollment() {
     sed -i "s|files/truststore-root\\.jks|files/truststore-${ica}.jks|" "$cfg"
 }
 # END enable_enrollment
+
+# Copies (as_root and prune_health_list are copied from tak-docker-install.sh; the CI check .github/ci/test_docker_non_root.sh fails if the copies differ)
+# BEGIN as_root
+# Run a command as root: directly when the script already runs as root, through sudo otherwise.
+# Needed for ownership changes (chown/chgrp to another user or group), which a normal user cannot make.
+as_root() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
+# END as_root
+# BEGIN prune_health_list
+# The 5.8 hardened health checks also checksum a list of files (tak/health/<name>/critical_file_list.txt) and fail
+# when one is missing. That list names /usr/share/crypto-policies/back-ends/*/openssl.config, which the current
+# UBI 10 crypto-policies package no longer ships, so both containers stay "unhealthy" although they work.
+# Drop entries that do not exist inside the container; the rest are still checked. Older bundles have no list.
+# Arguments: CONTAINER NAME [TAK_FOLDER, default tak]. When this user cannot write the list (an install made by root),
+# the changes go through as_root. The same function is in docker/tak-docker-enable-enrollment.sh, for installs made
+# before v1.0.2 (the CI check test_docker_non_root.sh fails if the two copies differ). (From tranzmatt, PR #30.)
+prune_health_list() {
+    local container="$1" list="${3:-tak}/health/$2/critical_file_list.txt" kept removed=0 line root=""
+    [ -f "$list" ] || return 0
+    kept=$(mktemp)
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            ''|'#'*) echo "$line" >> "$kept"; continue ;;
+        esac
+        if $DOCKER exec "$container" test -e "$line" 2>/dev/null; then
+            echo "$line" >> "$kept"
+        else
+            removed=$((removed + 1))
+        fi
+    done < "$list"
+    if [ "$removed" -gt 0 ]; then
+        { [ -w "$list" ] && [ -w "$(dirname "$list")" ]; } || root="as_root"
+        $root cp "$list" "${list}.orig"
+        $root tee "$list" < "$kept" > /dev/null
+        $root rm -f "$(dirname "$list")/critical_file_checksums.txt"
+        warn "Health check: removed ${removed} file(s) missing from ${container} from $list (original kept as ${list}.orig)"
+    fi
+    rm -f "$kept"
+}
+# END prune_health_list
+
+# BEGIN fix_cert_folder
+# Installs made before v1.0.2 hand certs/files to 1000:1000 (mode 755, private keys mode 600). The 5.8 hardened container runs as uid 1001 in
+# group 0, so as its own user it cannot write in the folder, and it cannot read the CA key either: "./makeCert.sh client NAME" then fails
+# (and still exits 0, with no .p12 and a certificate that does not match its key). New installs keep the host user as owner and group 0, with a
+# group-writable folder and group-readable private keys; this does the same here. Group 0 on the host is only root, so no other host user
+# can read the keys. The owner stays as it is (a root owner becomes 1000, as the installer does). A folder that is already right is left
+# alone, unless "force" is the second argument (after this script ran makeCert.sh as root, its new files belong to root).
+fix_cert_folder() {
+    local container="$1" force="${2:-}" state owner group mode closed
+    state=$($DOCKER exec -u root "$container" stat -c '%u %g %a' /opt/tak/certs/files 2>/dev/null) || { warn "Could not look at /opt/tak/certs/files in $container."; return 1; }
+    set -- $state
+    owner=$1; group=$2; mode=$3
+    closed=$($DOCKER exec -u root "$container" find /opt/tak/certs/files -maxdepth 1 -name '*.key' ! -perm -g=r 2>/dev/null | head -n 1)
+    if [ "$force" != "force" ] && [ "$group" = "0" ] && [ $(( 8#$mode & 8#020 )) -ne 0 ] && [ -z "$closed" ]; then
+        return 0
+    fi
+    [ "$owner" = "0" ] && owner=1000
+    $DOCKER exec -u root "$container" bash -c "chown -R ${owner}:0 /opt/tak/certs/files/ && chmod g+rwx /opt/tak/certs/files/ && find /opt/tak/certs/files -maxdepth 1 -name '*.key' -exec chmod g+r {} +" \
+        || { warn "Could not set group 0 on /opt/tak/certs/files in $container."; return 1; }
+    log "certs/files is now ${owner}:0 with group write and group-readable keys (it was ${state}), so TAK Server's own user can make certificates."
+}
+# END fix_cert_folder
 
 # Prints the elements of a CoreConfig.xml that are NOT inside an XML comment; exit 0 when there is an active <certificateSigning>.
 has_active_enrollment() {
@@ -92,7 +166,7 @@ main() {
             --yes|-y) ASSUME_YES=true ;;
             --container) CONTAINER="${2:-}"; shift ;;
             --verify-user) TAK_VERIFY_USER="${2:-}"; shift ;;
-            -h|--help) sed -n 2,30p "$0"; return 0 ;;
+            -h|--help) sed -n 2,36p "$0"; return 0 ;;
             *) err "Unknown option: $1 (see --help)"; return 2 ;;
         esac
         shift
@@ -137,16 +211,28 @@ main() {
     log "tak folder: $TAK_DIR"
     local CFG="$TAK_DIR/CoreConfig.xml" FILES="$TAK_DIR/certs/files"
 
+    # --- what v1.0.2 also fixes for installs made before it (these run whether or not enrollment is already on; both are safe to repeat)
+    # a. the container's own user must be able to write in certs/files (makeCert.sh)
+    fix_cert_folder "$CONTAINER" || true
+    # b. the hardened 5.8 health check lists a file the image does not ship, so both containers stay "unhealthy" while TAK Server works
+    local DB_CONTAINER="${CONTAINER/#takserver-/takserver-db-}" pruned=false
+    for pair in "$CONTAINER:takserver" "$DB_CONTAINER:takserver-db"; do
+        if [ "$($DOCKER inspect -f '{{.State.Running}}' "${pair%%:*}" 2>/dev/null)" = "true" ] && [ -f "$TAK_DIR/health/${pair##*:}/critical_file_list.txt" ]; then
+            prune_health_list "${pair%%:*}" "${pair##*:}" "$TAK_DIR" && pruned=true
+        fi
+    done
+    $pruned && echo "  The health check runs every 30 seconds: look at docker ps again in a minute or two."
+
     # --- already set up? Then change nothing.
     if has_active_enrollment "$CFG"; then
-        log "CoreConfig.xml already has a certificateSigning block: nothing to change."
+        log "CoreConfig.xml already has a certificateSigning block: enrollment needs no change."
         local code; code=$(enrollment_status)
         if [ "$code" = "200" ]; then
             log "8446 /Marti/api/tls/config answers HTTP 200 for ${TAK_VERIFY_USER}. Enrollment works."
         elif [ -n "${TAK_VERIFY_USER:-}" ]; then
             warn "8446 /Marti/api/tls/config answered HTTP ${code:-none} for ${TAK_VERIFY_USER}. The block is there, so check the user and password, then the TAK Server logs: docker logs $CONTAINER"
         else
-            log "Nothing was changed. To confirm sign-in works, run this again with --verify-user NAME (an existing TAK user)."
+            log "To confirm sign-in works, run this again with --verify-user NAME (an existing TAK user)."
         fi
         return 0
     fi
@@ -182,10 +268,9 @@ main() {
         log "Signing keystore for $ICA already exists: reusing it."
     else
         log "Making the intermediate signing CA: $ICA"
-        # As root: the installer hands certs/files to uid 1000 at its last step, and the container's own user cannot write there any more.
-        # The files are handed back to 1000:1000 right after, as the installer does.
+        # As root: it does not depend on who owns certs/files. The new files are handed to the same owner, group 0, right after, as the installer does.
         $DOCKER exec -u root "$CONTAINER" bash -c "cd /opt/tak/certs && echo n | ./makeCert.sh ca ${ICA}" > "$MAKECERT_LOG" 2>&1 || true
-        $DOCKER exec -u root "$CONTAINER" bash -c "chown -R 1000:1000 /opt/tak/certs/files/"
+        fix_cert_folder "$CONTAINER" force || true
         if [ ! -s "$FILES/${ICA}-signing.jks" ] || [ ! -s "$FILES/truststore-${ICA}.jks" ]; then
             err "makeCert.sh did not make ${ICA}-signing.jks and truststore-${ICA}.jks. CoreConfig.xml was not changed. Its output:"
             tail -n 15 "$MAKECERT_LOG" >&2
