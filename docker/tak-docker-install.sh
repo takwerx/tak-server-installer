@@ -8,10 +8,33 @@
 # Uses the official takserver-docker-*.zip from https://tak.gov — not the .deb/.rpm.
 # After images exist, you can run stacks with this script (docker run) or
 # docker/docker-compose.yml (docker compose).
+#
+# Usage:
+#   ./tak-docker-install.sh /path/to/takserver-docker[-hardened]-<version>.zip
+# With no argument it uses $TAK_ZIP, then any takserver-docker-*.zip in INSTALL_DIR.
 #==========================================================================
 
 set -e
 
+usage() {
+    cat <<USAGE
+Usage: $(basename "$0") /path/to/takserver-docker-<version>.zip
+
+  Installs TAK Server in Docker from the official TAK.gov Docker ZIP, standard
+  (takserver-docker-<version>.zip) or hardened (takserver-docker-hardened-<version>.zip).
+  The ZIP can be anywhere; it is extracted into ~/tak-docker (INSTALL_DIR in the script).
+
+  Without an argument: uses \$TAK_ZIP if set, otherwise any takserver-docker-*.zip
+  already in ~/tak-docker (asks which one if there are several).
+
+Example:
+  $(basename "$0") ~/Downloads/takserver-docker-hardened-5.8-RELEASE-92.zip
+USAGE
+}
+case "${1:-}" in
+    -h|--help) usage; exit 0 ;;
+    -*) usage >&2; exit 1 ;;
+esac
 # Where this script lives, found before the first cd: the README runs it as ./docker/tak-docker-install.sh,
 # and a relative $0 no longer points at the script once it has changed into the install folder.
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
@@ -26,6 +49,16 @@ log()  { echo -e "${GRN}[+]${NC} $1"; }
 warn() { echo -e "${YEL}[!]${NC} $1"; }
 err()  { echo -e "${RED}[ERROR]${NC} $1"; }
 step() { echo -e "\n${CYN}=== STEP $1 ===${NC}"; }
+
+# Run a command as root: directly when the script already runs as root, through sudo otherwise.
+# Needed for ownership changes (chown/chgrp to another user or group), which a normal user cannot make.
+as_root() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
 
 echo ""
 echo "============================================="
@@ -90,6 +123,14 @@ if ! command -v docker &>/dev/null; then
     exit 1
 fi
 log "Docker: $(docker --version)"
+
+# Memory. TAK Server runs several JVMs (config, messaging, API, retention, plugins) next to PostgreSQL.
+# An 8 GB Raspberry Pi 5 works but is tight; below 8 GB the server usually runs out of memory.
+MEM_KB=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+if [ "${MEM_KB:-0}" -gt 0 ] && [ "$MEM_KB" -lt 7500000 ]; then
+    warn "Only $((MEM_KB / 1024)) MB of RAM. TAK Server needs 8 GB or more and may fail to start or be killed for lack of memory."
+fi
+log "Architecture: $(uname -m), RAM: $((MEM_KB / 1024)) MB"
 
 # Check we can run docker without sudo
 if ! docker info &>/dev/null; then
@@ -167,17 +208,36 @@ step "1: Locate TAK Server Docker ZIP"
 
 mkdir -p "$INSTALL_DIR"
 
-# Find all takserver docker ZIPs in the install dir
+# Pick the ZIP: the first argument, else $TAK_ZIP, else whatever is in ${INSTALL_DIR}.
+#   ./tak-docker-install.sh /path/to/takserver-docker-5.8-RELEASE-92.zip
+#   TAK_ZIP=/path/to/takserver-docker-hardened-5.8-RELEASE-92.zip ./tak-docker-install.sh
+TAK_ZIP="${1:-${TAK_ZIP:-}}"
 ZIPS=()
-while IFS= read -r f; do
-    ZIPS+=("$f")
-done < <(ls "${INSTALL_DIR}"/takserver-docker-*.zip 2>/dev/null)
+if [ -n "$TAK_ZIP" ]; then
+    if [ ! -f "$TAK_ZIP" ]; then
+        err "ZIP not found: ${TAK_ZIP}"
+        exit 1
+    fi
+    case "$(basename "$TAK_ZIP")" in
+        takserver-docker-*.zip) ;;
+        *) err "$(basename "$TAK_ZIP") is not a TAK Server Docker ZIP (expected takserver-docker-*.zip or takserver-docker-hardened-*.zip)."
+           exit 1 ;;
+    esac
+    TAK_ZIP=$(realpath "$TAK_ZIP")
+    ZIPS=("$TAK_ZIP")
+else
+    # Find all takserver docker ZIPs in the install dir
+    while IFS= read -r f; do
+        ZIPS+=("$f")
+    done < <(ls "${INSTALL_DIR}"/takserver-docker-*.zip 2>/dev/null)
+fi
 
 if [ ${#ZIPS[@]} -eq 0 ]; then
     err "No takserver-docker-*.zip found in ${INSTALL_DIR}"
     echo ""
     echo "  Download any TAK Server Docker release from https://tak.gov"
     echo "  and place the ZIP in: ${INSTALL_DIR}/"
+    echo "  or pass its path:     $0 /path/to/takserver-docker-<version>.zip"
     echo ""
     echo "  Examples:"
     echo "    takserver-docker-5.6-RELEASE-57.zip"
@@ -199,7 +259,10 @@ else
     TAK_ZIP="${ZIPS[$ZIP_SEL]}"
 fi
 
-log "Using: $(basename "$TAK_ZIP")"
+case "$(basename "$TAK_ZIP")" in
+    takserver-docker-hardened-*) log "Using: $(basename "$TAK_ZIP") (hardened: UBI 10 base, FIPS, non-root containers, health checks)" ;;
+    *)                           log "Using: $(basename "$TAK_ZIP") (standard)" ;;
+esac
 
 #----------------------------------------------------------------------
 # 2. Network interface selection
@@ -247,7 +310,12 @@ log "Extracting $(basename "$TAK_ZIP")..."
 unzip -o "$TAK_ZIP"
 
 # Find extracted dir - could be takserver-docker-X.X-RELEASE-XX or similar
-TAK_DIR=$(find . -maxdepth 1 -type d -name 'takserver-docker*' -print 2>/dev/null | sort -r | head -1)
+# Use the top-level folder named inside this ZIP, so another bundle extracted here earlier
+# (standard next to hardened, or an older release) is never picked by mistake.
+TAK_DIR=$(unzip -Z1 "$TAK_ZIP" 2>/dev/null | head -1 | cut -d/ -f1)
+if [ -z "$TAK_DIR" ] || [ ! -d "$TAK_DIR/tak" ]; then
+    TAK_DIR=$(find . -maxdepth 1 -type d -name 'takserver-docker*' -print 2>/dev/null | sort -r | head -1)
+fi
 if [ -z "$TAK_DIR" ]; then
     # Some ZIPs extract without a top-level directory
     if [ -d "tak" ]; then
@@ -272,6 +340,12 @@ if [ -d "tak" ]; then
     # "tee: /opt/tak/logs/takserver.log: Permission denied" and "AccessDeniedException: TAKIgniteConfig.xml".
     # Give group 0 write access (harmless for 5.6/5.7, whose containers run as root).
     chmod -R g+rwX tak
+    # Unzipped by a normal user, tak/ belongs to that user's own group, not group 0, so the write access above
+    # would not reach the containers. Hand the group to 0 (needs root); the files stay owned by this user.
+    if [ "$(id -u)" -ne 0 ]; then
+        log "Setting group 0 on tak/ so the containers can write to it (sudo)..."
+        as_root chgrp -R 0 tak
+    fi
 fi
 
 # Get version string from version.txt
@@ -429,12 +503,14 @@ if [ "$PERSIST_DB" = true ]; then
     # Hand the folder to whatever user the image runs as; 5.6/5.7 images run as root and are left alone.
     DB_RUN_UID=$($DOCKER run --rm --entrypoint id takserver-db:"${VERSION}" -u 2>/dev/null | tr -d '[:space:]' || true)
     if [[ "$DB_RUN_UID" =~ ^[0-9]+$ ]] && [ "$DB_RUN_UID" != "0" ]; then
-        chown "${DB_RUN_UID}:0" "$DB_DATA_DIR"
-        chmod 700 "$DB_DATA_DIR"
+        as_root chown "${DB_RUN_UID}:0" "$DB_DATA_DIR"
+        as_root chmod 700 "$DB_DATA_DIR"
         log "Database folder owned by uid ${DB_RUN_UID} (the user the database image runs as)"
         # That image also runs initdb while it is built, and an empty bind-mounted folder hides the result
         # ("pg_ctl: directory ... is not a database cluster directory"). Copy the image's cluster in on first use.
-        if [ -z "$(ls -A "$DB_DATA_DIR" 2>/dev/null)" ]; then
+        # The folder is now mode 700 for another uid, so a normal user cannot list it: look as root, or an
+        # existing database would read as empty and be overwritten.
+        if [ -z "$(as_root ls -A "$DB_DATA_DIR" 2>/dev/null)" ]; then
             $DOCKER run --rm --entrypoint sh -v "${DB_DATA_DIR}":/seed:z takserver-db:"${VERSION}" \
                 -c 'cp -a /var/lib/postgresql/data/. /seed/' \
                 || { err "Could not initialise the database folder ${DB_DATA_DIR}"; exit 1; }
@@ -608,6 +684,35 @@ fi
 
 log "Both containers running"
 
+# The 5.8 hardened health checks also checksum a list of files (tak/health/<name>/critical_file_list.txt) and fail
+# when one is missing. That list names /usr/share/crypto-policies/back-ends/*/openssl.config, which the current
+# UBI 10 crypto-policies package no longer ships, so both containers stay "unhealthy" although they work.
+# Drop entries that do not exist inside the container; the rest are still checked. Older bundles have no list.
+prune_health_list() {
+    local container="$1" list="tak/health/$2/critical_file_list.txt" kept removed=0 line
+    [ -f "$list" ] || return 0
+    kept=$(mktemp)
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            ''|'#'*) echo "$line" >> "$kept"; continue ;;
+        esac
+        if $DOCKER exec "$container" test -e "$line" 2>/dev/null; then
+            echo "$line" >> "$kept"
+        else
+            removed=$((removed + 1))
+        fi
+    done < "$list"
+    if [ "$removed" -gt 0 ]; then
+        cp "$list" "${list}.orig"
+        cat "$kept" > "$list"
+        rm -f "tak/health/$2/critical_file_checksums.txt"
+        warn "Health check: removed ${removed} file(s) missing from ${container} from $list (original kept as ${list}.orig)"
+    fi
+    rm -f "$kept"
+}
+prune_health_list "$DB_CONTAINER" takserver-db
+prune_health_list "$TAK_CONTAINER" takserver
+
 #----------------------------------------------------------------------
 # 11. Generate Certificates
 #----------------------------------------------------------------------
@@ -625,9 +730,11 @@ log "Generating admin certificate: ${ADMIN_CERT}"
 $DOCKER exec -it "$TAK_CONTAINER" bash -c \
     "cd /opt/tak/certs && ./makeCert.sh client ${ADMIN_CERT}"
 
+# Restart the container rather than running configureInDocker.sh again with docker exec: the image's entrypoint
+# already runs it, so a second copy starts beside the first and fails with "Port 8443 was already in use"
+# (seen with 5.8). A container restart stops every TAK process and starts one clean set with the new certs.
 log "Restarting TAK Server to load certificates..."
-$DOCKER exec -d "$TAK_CONTAINER" bash -c \
-    "cd /opt/tak/ && ./configureInDocker.sh"
+$DOCKER restart "$TAK_CONTAINER" >/dev/null
 
 log "Waiting 45s for TAK Server to restart with certs..."
 sleep 45
@@ -648,10 +755,15 @@ log "Admin certificate authorized"
 #----------------------------------------------------------------------
 step "13: Fix File Permissions"
 
+# Hand the cert files to the host user so they can be copied off the box, but keep group 0: the 5.8 hardened
+# container runs as tak (uid 1001) in group 0 and must still write here to make more certs (makeCert.sh).
+# Group write goes on the folder only, so the private keys keep the owner-only mode makeCert.sh gives them.
+CERT_UID=$(id -u)
+[ "$CERT_UID" -eq 0 ] && CERT_UID=1000
 $DOCKER exec -u root "$TAK_CONTAINER" bash -c \
-    "chown -R 1000:1000 /opt/tak/certs/files/"
+    "chown -R ${CERT_UID}:0 /opt/tak/certs/files/ && chmod g+rwx /opt/tak/certs/files/"
 
-log "File permissions fixed (1000:1000)"
+log "File permissions fixed (${CERT_UID}:0)"
 
 #----------------------------------------------------------------------
 # 14. Verify
@@ -715,7 +827,7 @@ echo "    DB Logs: docker logs -f ${DB_CONTAINER}"
 echo "    Stop:    docker stop ${TAK_CONTAINER} ${DB_CONTAINER}"
 echo "    Start:   docker start ${DB_CONTAINER} ${TAK_CONTAINER}"
 echo "    Shell:   docker exec -it ${TAK_CONTAINER} bash"
-echo "    Restart: docker exec -d ${TAK_CONTAINER} bash -c 'cd /opt/tak && ./configureInDocker.sh'"
+echo "    Restart: docker restart ${TAK_CONTAINER}"
 echo ""
 echo "  Optional Compose (from repo clone, after images are built):"
 echo "    export VERSION=\"${VERSION}\""

@@ -322,7 +322,16 @@ sed -i 's#^FROM postgres:15.1#FROM postgres:15-bookworm#' docker/Dockerfile.taks
 
 - Linux host with Docker (Ubuntu 22.04, Rocky Linux 9, Jetson Ubuntu, etc.)
 - Same rough VPS sizing as native installs (8GB+ RAM, 4+ cores, 50GB+ disk)
-- Place `takserver-docker-*.zip` in `~/tak-docker/` (or set `INSTALL_DIR` in the script)
+- The `takserver-docker-*.zip` (or `takserver-docker-hardened-*.zip`) from TAK.gov, anywhere on the host; you pass its path to the script. It is extracted into `~/tak-docker/` (set `INSTALL_DIR` in the script to change that).
+- Run the script as a normal user in the `docker` group with sudo rights. It asks for sudo only to set file ownership for the 5.8 hardened containers.
+
+### Raspberry Pi 5 / ARM64
+
+The Docker install runs on a Raspberry Pi 5 (64-bit Raspberry Pi OS / Debian 13, arm64). Use the 16 GB model if you can; 8 GB works but is tight, and the script warns below 8 GB. Boot from an NVMe SSD rather than an SD card, since PostgreSQL writes constantly.
+
+- Use the Docker bundle, for example `takserver-docker-hardened-5.8-RELEASE-92.zip`. Not the `.deb`/`.rpm`, and not `takserver-fedhub-docker-*.zip` (that is Federation Hub).
+- The Pi 5 kernel uses 16K memory pages. Eclipse Temurin 17 on UBI 10 (the TAK Server image base) was checked on it and runs fine, so no kernel change is needed.
+- Install Docker from Docker's own repo (`docker-ce`, `docker-buildx-plugin`) or Debian's (`docker.io`, `docker-buildx`). TAK Server 5.8 needs buildx: its database Dockerfile turns BuildKit's `TARGETARCH=arm64` into `aarch64` to download PostgreSQL 18 and PostGIS 3.6, and both are published for `aarch64`.
 
 ### Automated install (recommended)
 
@@ -330,17 +339,33 @@ From this repository:
 
 ```bash
 git clone https://github.com/takwerx/tak-server-installer.git
-# Copy the Docker ZIP into ~/tak-docker/ (see script header for INSTALL_DIR)
-cp /path/to/takserver-docker-5.x-RELEASE-x.zip ~/tak-docker/
 chmod +x ~/tak-server-installer/docker/tak-docker-install.sh
-~/tak-server-installer/docker/tak-docker-install.sh
+# Pass the path to the Docker ZIP you downloaded from TAK.gov (standard or hardened):
+~/tak-server-installer/docker/tak-docker-install.sh /path/to/takserver-docker-hardened-5.8-RELEASE-92.zip
 ```
 
 The script:
 
 1. Installs Docker if missing (apt or dnf), configures `CoreConfig.xml` and `cert-metadata.sh`, builds `takserver-db` and `takserver` images, runs containers, generates certificates, and promotes the admin client.
 
-Edit variables at the top of `docker/tak-docker-install.sh` (CA name, org fields, cert password, etc.) before running.
+Edit variables at the top of `docker/tak-docker-install.sh` (CA name, org fields, cert password, etc.) before running. `--help` prints the usage.
+
+Without a path, the script uses `TAK_ZIP` if set, otherwise any `takserver-docker-*.zip` already in `~/tak-docker/` (and asks which one if there are several).
+
+### Standard or hardened bundle
+
+TAK.gov publishes two Docker bundles per release; the script installs either one.
+
+| | Standard (`takserver-docker-<ver>.zip`) | Hardened (`takserver-docker-hardened-<ver>.zip`) |
+|---|---|---|
+| Base images | Public `postgres` and `eclipse-temurin` images | Red Hat UBI 10 with DISA STIG fixes applied at build time |
+| Crypto | Default Java/OpenSSL | FIPS mode on, ChaCha20 ciphers disabled |
+| Runs as | root | non-root (`tak` uid 1001, `postgres`, both in group 0) |
+| Health checks | none | `docker ps` shows healthy/unhealthy; also checks critical files' checksums |
+| Database | PostgreSQL 15 | PostgreSQL 18 (5.8) |
+| Build time | shorter | longer (full OS update plus hardening scripts) |
+
+Pick hardened if you need STIG/FIPS compliance or want the health checks. For a home lab or a Raspberry Pi, standard is fine. Data does not move between the two automatically, because the database versions differ (see the PostgreSQL upgrade notes in the bundle's `docker/README_hardened_docker.md`).
 
 ### Compose (optional)
 

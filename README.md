@@ -29,7 +29,7 @@ sudo ./Ubuntu_22.04_Caddy_setup.sh
 sudo ./Ubuntu_22.04_TAK_Server_Hardening.sh
 ```
 
-**Docker (optional):** use the official Docker ZIP, then run `./docker/tak-docker-install.sh` (see [DEPLOYMENT-GUIDE.md](DEPLOYMENT-GUIDE.md#docker-tak-server-using-official-docker-zip-optional)).
+**Docker (optional):** download the official Docker ZIP, then run `./docker/tak-docker-install.sh /path/to/takserver-docker-<version>.zip` (see [DEPLOYMENT-GUIDE.md](DEPLOYMENT-GUIDE.md#docker-tak-server-using-official-docker-zip-optional)).
 
 **That's it!** Your TAK Server is running at `https://YOUR-IP:8443`
 
@@ -96,6 +96,8 @@ tak-server-installer/
 ├── docker/
 │   ├── tak-docker-install.sh   # Install from takserver-docker-*.zip
 │   └── docker-compose.yml      # Optional stack after images are built
+├── takx/
+│   └── install-takx.sh         # Install TAKX headless, incl. arm64 (system JDK 17)
 ├── docs/
 │   ├── guard-dogs.md           # Guard Dog monitoring explained
 │   └── PLATFORM_REFERENCE.md   # Outside services this repo depends on
