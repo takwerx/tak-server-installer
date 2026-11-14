@@ -227,5 +227,33 @@ run --yes
 if grep -q 'chown -R 1000:0 /opt/tak/certs/files/' "$work/t12/docker.log"; then ok "a root-owned certs/files becomes 1000:0, as the installer does"; else fail "root-owned certs/files not handled" "$(grep chown "$work/t12/docker.log")"; fi
 unset FAKE_CERT_STATE FAKE_MISSING
 
+# --- 7. an install made with sudo has a tak/ folder this user cannot write (ops #757): the script must stop BEFORE any change and say "sudo",
+# not fail halfway at the backup copy with a bare "Permission denied". (Root can write anywhere, so this check cannot run as root.)
+if [ "$(id -u)" -eq 0 ]; then
+  echo "skip the root-owned install check (running as root can write everywhere)"
+else
+  new_box t14
+  chmod 444 "$work/t14/tak/CoreConfig.xml"; chmod 555 "$work/t14/tak"
+  run --yes; rc=$?
+  chmod 755 "$work/t14/tak"; chmod 644 "$work/t14/tak/CoreConfig.xml"
+  if [ "$rc" -ne 0 ] && cmp -s "$work/t14/original.xml" "$work/t14/tak/CoreConfig.xml" && ! ls "$work"/t14/tak/CoreConfig.xml.before-enrollment-* >/dev/null 2>&1 \
+     && [ "$(cnt t14 'makeCert|^docker restart')" -eq 0 ]; then
+    ok "a tak folder this user cannot write: the script stops before the intermediate CA, any change or any restart"
+  else
+    fail "a read-only tak folder was not stopped cleanly (exit $rc)" "$(tail -n 6 "$work/out.txt")" "$(grep -E 'makeCert|restart' "$work/t14/docker.log")"
+  fi
+  if grep -q 'sudo ./docker/tak-docker-enable-enrollment.sh' "$work/out.txt" && ! grep -q 'Permission denied' "$work/out.txt"; then
+    ok "the message tells the user to run it with sudo (and is not a bare Permission denied)"
+  else
+    fail "the message does not say to use sudo" "$(tail -n 6 "$work/out.txt")"
+  fi
+  # an install with enrollment already on needs no write to CoreConfig.xml, so it is not refused for the missing sudo
+  new_box t15; enable_enrollment "$work/t15/tak/CoreConfig.xml" Acme-Root-Intermediate Acme Ops
+  chmod 444 "$work/t15/tak/CoreConfig.xml"; chmod 555 "$work/t15/tak"
+  run --yes; rc=$?
+  chmod 755 "$work/t15/tak"; chmod 644 "$work/t15/tak/CoreConfig.xml"
+  if [ "$rc" -eq 0 ] && grep -q 'already has a certificateSigning block' "$work/out.txt"; then ok "enrollment already on in a read-only tak folder: still exit 0, nothing to change"; else fail "an enrolled install in a read-only folder was refused (exit $rc)" "$(tail -n 4 "$work/out.txt")"; fi
+fi
+
 [ "$fails" -eq 0 ] && echo "all docker enable-enrollment checks passed" || echo "$fails docker enable-enrollment check(s) failed"
 [ "$fails" -eq 0 ]

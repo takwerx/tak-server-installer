@@ -408,8 +408,10 @@ Docker installs made with an installer older than v1.0.2 have no certificate enr
 Get the new scripts (`git pull`), then run this on the machine that runs TAK Server:
 
 ```
-./docker/tak-docker-enable-enrollment.sh
+sudo ./docker/tak-docker-enable-enrollment.sh
 ```
+
+Use `sudo`. If you installed with `sudo` (most people did), the `tak/` folder belongs to root and a normal user cannot change `CoreConfig.xml` there. Without `sudo` the script stops before it changes anything and tells you to run it again with `sudo`.
 
 It makes an intermediate signing CA under your root CA, adds the `certificateSigning` block to `tak/CoreConfig.xml` (the old file is kept beside it, with the date in its name) and restarts the TAK Server container, which takes about a minute. The database, users, existing certificates and ports are not changed, and `ca.pem` stays your root CA, so certificates you make later with `makeCert.sh` are signed as before. If TAK Server does not come back, the script puts the old `CoreConfig.xml` back and restarts it again.
 
