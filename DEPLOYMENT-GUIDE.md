@@ -354,7 +354,27 @@ The script asks one question about ATAK: **the address or name your ATAK users w
 Two things must be true on each phone, or ATAK refuses the sign-in:
 
 1. **The address ATAK users type is in the server certificate.** ATAK compares it with the names in the certificate. The installer puts `takserver`, this machine's address and the names you gave it there. Any other address ends in *The TAK Server's identity could not be verified* (the log says *no alternative certificate subject name matches target ipv4 address*).
-2. **ATAK trusts the installer's CA.** ATAK does not know it. Copy `tak/certs/files/truststore-<CA name>-Intermediate.p12` (for the default name: `truststore-Yankee1-Intermediate.p12`) to the phone and load it in ATAK as the default TrustStore: **Settings > Network Preferences > Network Connection Preferences**. The password is `atakatak`. Without it ATAK ends with *self-signed certificate in certificate chain*. The installer prints this path at the end.
+2. **ATAK trusts the installer's CA.** ATAK does not know it. The file is `tak/certs/files/truststore-<CA name>-Intermediate.p12` (for the default name: `truststore-Yankee1-Intermediate.p12`, password `atakatak`). Without it ATAK ends with *self-signed certificate in certificate chain*. Give it to ATAK in one of two ways:
+   - **A data package (best for many phones).** Make a zip with the CA file in `certs/`, a `MANIFEST/manifest.xml`, and a `config.pref` that defines the server and its CA, then send it to the phones (or copy it to `atak/tools/datapackage/` on the phone). ATAK adds the server, trusts the CA for it and asks for the username and password:
+
+     ```xml
+     <preferences>
+       <preference version="1" name="cot_streams">
+         <entry key="count" class="class java.lang.Integer">1</entry>
+         <entry key="description0" class="class java.lang.String">My TAK Server</entry>
+         <entry key="enabled0" class="class java.lang.Boolean">true</entry>
+         <entry key="connectString0" class="class java.lang.String">ADDRESS:8089:ssl</entry>
+         <entry key="caLocation0" class="class java.lang.String">cert/truststore-Yankee1-Intermediate.p12</entry>
+         <entry key="caPassword0" class="class java.lang.String">atakatak</entry>
+         <entry key="enrollForCertificateWithTrust0" class="class java.lang.Boolean">true</entry>
+         <entry key="useAuth0" class="class java.lang.Boolean">true</entry>
+         <entry key="cacheCreds0" class="class java.lang.String">Cache credentials</entry>
+       </preference>
+     </preferences>
+     ```
+
+     `ADDRESS` is one of the names in the server certificate. The manifest lists both files (`config.pref` and `certs/<file>.p12`).
+   - **By hand on one phone.** Copy the CA file to `atak/cert/` on the phone. In ATAK set **Settings > Network Preferences > Network Connection Preferences > Default SSL/TLS TrustStore Password** to `atakatak`, then pick the file under **Default SSL/TLS TrustStore Location**.
 
 Then add a user (web UI or UserManager) and, in ATAK, enter the server address, turn on *Use Authentication* and enroll with that user and password.
 
@@ -436,6 +456,8 @@ The same script also brings an old Docker install in line with v1.0.2 in two mor
 ```
 sudo ./docker/tak-docker-enable-enrollment.sh --server-name 203.0.113.10,tak.example.org
 ```
+
+List every address and name your users type: the new certificate names `takserver` and the names you give, nothing else.
 
 It keeps the old certificate files in `tak/certs/files/server-cert-before-<time>`, makes the new one with the same CA (phones that trust the CA keep working) and restarts TAK Server. If the new certificate cannot be made, the old files come back. It works on its own too, even when enrollment is already on. At the end it prints the CA file to load into ATAK (see above).
 

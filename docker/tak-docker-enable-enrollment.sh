@@ -247,9 +247,9 @@ print_atak_help() {
     p12="$files/${name}.p12"
     echo ""
     if [ -s "$p12" ]; then
-        echo "  On each phone, load this file into ATAK as the default TrustStore (password: atakatak):"
+        echo "  Give ATAK this CA file (password: atakatak):"
         echo "      $p12"
-        echo "  ATAK: Settings > Network Preferences > Network Connection Preferences."
+        echo "  The easiest way for many phones is a data package: DEPLOYMENT-GUIDE.md, 'Signing in from ATAK'."
         echo "  Without it ATAK says: self-signed certificate in certificate chain."
     fi
     echo "  In ATAK, type an address that is in the server certificate. Any other ends in: The TAK Server's identity could not be verified."
