@@ -347,6 +347,17 @@ The script:
 
 Edit variables at the top of `docker/tak-docker-install.sh` (CA name, org fields, cert password, etc.) before running.
 
+The script asks one question about ATAK: **the address or name your ATAK users will type to reach the server**. Press Enter to use this machine's own address. If your users connect by the public address or a host name, type it here (several: separate them with commas). It goes into the server certificate. To skip the question, set `TAK_SERVER_NAMES` first, for example `TAK_SERVER_NAMES=203.0.113.10,tak.example.org ./docker/tak-docker-install.sh`. IPv4 addresses and plain host names work (no `*` names, no IPv6).
+
+### Signing in from ATAK with a username and password (port 8446)
+
+Two things must be true on each phone, or ATAK refuses the sign-in:
+
+1. **The address ATAK users type is in the server certificate.** ATAK compares it with the names in the certificate. The installer puts `takserver`, this machine's address and the names you gave it there. Any other address ends in *The TAK Server's identity could not be verified* (the log says *no alternative certificate subject name matches target ipv4 address*).
+2. **ATAK trusts the installer's CA.** ATAK does not know it. Copy `tak/certs/files/truststore-<CA name>-Intermediate.p12` (for the default name: `truststore-Yankee1-Intermediate.p12`) to the phone and load it in ATAK as the default TrustStore: **Settings > Network Preferences > Network Connection Preferences**. The password is `atakatak`. Without it ATAK ends with *self-signed certificate in certificate chain*. The installer prints this path at the end.
+
+Then add a user (web UI or UserManager) and, in ATAK, enter the server address, turn on *Use Authentication* and enroll with that user and password.
+
 ### Compose (optional)
 
 After the ZIP is extracted and **both images are built** (`takserver-db:${VERSION}` and `takserver:${VERSION}`), you can run the stack with Compose from the **extracted** directory (where `tak/` and `docker/` exist):
@@ -419,6 +430,14 @@ The same script also brings an old Docker install in line with v1.0.2 in two mor
 
 - **Certificates made inside the container.** `tak/certs/files` gets group 0 and group write, and the private keys get group read (the folder keeps the same owner). Before, `docker exec <container> bash -c "cd /opt/tak/certs && ./makeCert.sh client NAME"` printed `Permission denied` and made no `.p12`, although it ended with exit code 0. Always check that `NAME.p12` is there. Group 0 on the host is root only, so other users on the machine still cannot read the keys.
 - **`(unhealthy)` in `docker ps`.** The 5.8 hardened health check also lists a system file that the image no longer has, so both containers stayed `(unhealthy)` while TAK Server worked. The script removes the missing entries from `tak/health/*/critical_file_list.txt` (the original is kept as `critical_file_list.txt.orig`). `docker ps` shows `(healthy)` within a minute or two.
+
+**Installs made before this fix name only `takserver` in the server certificate.** ATAK then refuses an address or host name. The same script can make a new server certificate with the names you give it:
+
+```
+sudo ./docker/tak-docker-enable-enrollment.sh --server-name 203.0.113.10,tak.example.org
+```
+
+It keeps the old certificate files in `tak/certs/files/server-cert-before-<time>`, makes the new one with the same CA (phones that trust the CA keep working) and restarts TAK Server. If the new certificate cannot be made, the old files come back. It works on its own too, even when enrollment is already on. At the end it prints the CA file to load into ATAK (see above).
 
 To prove enrollment works, add `--verify-user NAME` with an existing TAK user. The script asks for that user's password (it is not saved) and checks that 8446 answers HTTP 200 for it. Without that option, sign in once from an ATAK device. Running the script a second time changes nothing.
 
