@@ -39,6 +39,66 @@ as_root() {
 }
 # END as_root
 
+# BEGIN server_names
+# The names in the TAK Server certificate (ops #789). ATAK checks the address a user types against the names in the server certificate on
+# 8446 and refuses the sign-in when it is not there ("The TAK Server's identity could not be verified"). makeCert.sh puts one name in:
+# the name it is given, which here is takserver, so only "takserver" worked. These two functions add the addresses and names the users type.
+# The same functions are in docker/tak-docker-enable-enrollment.sh, for installs made before (the CI check test_docker_server_names.sh
+# fails if the two copies differ). Both need $DOCKER and err.
+
+# Prints the extra name lines (IP.2, DNS.2, ...) for a list of IPv4 addresses and host names split by commas or spaces. takserver is the
+# first name already (DNS.1), so it and repeats are skipped. Prints nothing and returns 1 for anything else (an IPv6 address, a * name, a space).
+server_alt_lines() {
+    local list="${1//,/ }" item lower o ip=1 dns=1 seen=" takserver " out=""
+    for item in $list; do
+        lower=$(printf '%s' "$item" | tr 'A-Z' 'a-z')
+        case "$seen" in *" $lower "*) continue ;; esac
+        if [[ "$item" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]]; then
+            for o in 1 2 3 4; do
+                [ "$((10#${BASH_REMATCH[$o]}))" -le 255 ] || { err "'$item' is not an IP address (a part is over 255)."; return 1; }
+            done
+            ip=$((ip + 1)); out+="IP.${ip} = ${item}"$'\n'
+        elif [[ "$item" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$ ]]; then
+            dns=$((dns + 1)); out+="DNS.${dns} = ${item}"$'\n'
+        else
+            err "'$item' is not an IPv4 address or a host name (letters, digits, dots and dashes only)."; return 1
+        fi
+        seen+="$lower "
+    done
+    printf '%s' "$out"
+}
+
+# Makes the server certificate (takserver.pem, .key, .jks, .p12) in the TAK Server container with "takserver" and the given names in
+# its name list. Arguments: CONTAINER NAMES. It runs a copy of the bundle's makeCert.sh with the extra lines added to the name list
+# (the bundle's own file is not changed). Checks the result by reading the names back: makeCert.sh exits 0 even when it fails.
+make_server_cert() {
+    local container="$1" lines name shown
+    lines=$(server_alt_lines "${2:-}") || return 1
+    $DOCKER exec -u root -e ALT_LINES="$lines" -e MATCH='$ALTNAMEFIELD = $SNAME' "$container" bash -c '
+        cd /opt/tak/certs || exit 2
+        n=0
+        while IFS= read -r l || [ -n "$l" ]; do
+            printf "%s\n" "$l"
+            if [ "$l" = "$MATCH" ]; then n=$((n + 1)); [ -z "$ALT_LINES" ] || printf "%s\n" "$ALT_LINES"; fi
+        done < makeCert.sh > makeCert-names.sh
+        if [ "$n" -ne 1 ]; then echo "makeCert.sh has an unexpected name list (found the marker $n times)"; rm -f makeCert-names.sh; exit 3; fi
+        chmod 755 makeCert-names.sh
+        ./makeCert-names.sh server takserver
+        rc=$?
+        rm -f makeCert-names.sh
+        exit $rc' || { err "makeCert.sh could not make the server certificate."; return 1; }
+    $DOCKER exec -u root "$container" test -s /opt/tak/certs/files/takserver.jks \
+        || { err "makeCert.sh did not make takserver.jks."; return 1; }
+    shown=$($DOCKER exec -u root "$container" openssl x509 -noout -ext subjectAltName -in /opt/tak/certs/files/takserver.pem 2>/dev/null)
+    for name in $(printf '%s' "$lines" | sed 's/^[A-Z]*\.[0-9]* = //'); do
+        case "$shown" in
+            *"$name"*) ;;
+            *) err "The server certificate does not name $name. Its names: ${shown//$'\n'/ }"; return 1 ;;
+        esac
+    done
+}
+# END server_names
+
 echo ""
 echo "============================================="
 echo "  TAK Server Docker Install"
@@ -320,6 +380,30 @@ if [ -z "$SERVER_IP" ]; then
 fi
 
 log "Using: ${NIC_NAME} → ${SERVER_IP}"
+
+#----------------------------------------------------------------------
+# 2b. The address or name ATAK users will type (goes into the server certificate, ops #789)
+#----------------------------------------------------------------------
+# ATAK checks what a user types as the server address against the names in the server certificate, so an address that is not in it
+# ends in "The TAK Server's identity could not be verified". This box's own address is always in it. Add the public address or the
+# host name your users type (several: separate them with commas). Set TAK_SERVER_NAMES to skip the question.
+if [ -z "${TAK_SERVER_NAMES:-}" ]; then
+    echo ""
+    echo "ATAK checks the address your users type against the server certificate."
+    echo "Type the address or name they will use to reach this server (several: separate with commas)."
+    echo "Examples: 203.0.113.10   tak.example.org"
+    while :; do
+        read -r -p "Address or name for ATAK users [${SERVER_IP}]: " TAK_SERVER_NAMES || true
+        TAK_SERVER_NAMES=${TAK_SERVER_NAMES:-$SERVER_IP}
+        server_alt_lines "${TAK_SERVER_NAMES},${SERVER_IP}" > /dev/null && break
+        TAK_SERVER_NAMES=""
+        [ -t 0 ] || exit 1
+    done
+fi
+CERT_NAMES="${TAK_SERVER_NAMES},${SERVER_IP}"
+CERT_NAME_LINES=$(server_alt_lines "$CERT_NAMES") || { err "TAK_SERVER_NAMES is not usable (see above)."; exit 1; }
+CERT_NAMES_SHOWN="takserver $(printf '%s' "$CERT_NAME_LINES" | sed 's/^[A-Z]*\.[0-9]* = //' | tr '\n' ' ')"
+log "The server certificate will name: ${CERT_NAMES_SHOWN}"
 
 #----------------------------------------------------------------------
 # 3. Extract ZIP
@@ -843,9 +927,10 @@ $DOCKER exec -it "$TAK_CONTAINER" bash -c \
     "cd /opt/tak/certs && echo y | MOVE_CA=true ./makeCert.sh ca ${INTERMEDIATE_CA_NAME}"
 [ -s "tak/certs/files/${INTERMEDIATE_CA_NAME}-signing.jks" ] || { err "No signing keystore was made for ${INTERMEDIATE_CA_NAME}"; exit 1; }
 
-log "Generating server certificate: takserver"
-$DOCKER exec -it "$TAK_CONTAINER" bash -c \
-    "cd /opt/tak/certs && ./makeCert.sh server takserver"
+# The server certificate names takserver plus the address and names from step 2b (ops #789): ATAK refuses a certificate that does not
+# name the address its user typed.
+log "Generating server certificate: ${CERT_NAMES_SHOWN}"
+make_server_cert "$TAK_CONTAINER" "$CERT_NAMES" || exit 1
 
 log "Generating admin certificate: ${ADMIN_CERT}"
 $DOCKER exec -it "$TAK_CONTAINER" bash -c \
@@ -948,6 +1033,15 @@ echo "    1. Copy ${ADMIN_CERT}.p12 to your workstation"
 echo "    2. Import into browser (password: ${CERT_PASS})"
 echo "    3. Browse to https://${SERVER_IP}:8443"
 echo "    4. Select the ${ADMIN_CERT} certificate when prompted"
+echo ""
+echo "  To sign in from ATAK with a username and password (port 8446):"
+echo "    1. Add a user in the web UI, or with UserManager."
+echo "    2. Give ATAK this CA file (password: ${CERT_PASS}), or it says: self-signed certificate in certificate chain:"
+echo "         $(pwd)/tak/certs/files/truststore-${INTERMEDIATE_CA_NAME}.p12"
+echo "       The easiest way for many phones is a data package. DEPLOYMENT-GUIDE.md, 'Signing in from ATAK', has the steps."
+echo "    3. In ATAK, type one of these as the server address: ${CERT_NAMES_SHOWN}"
+echo "       Any other address ends in: The TAK Server's identity could not be verified."
+echo "       To add one later, run docker/tak-docker-enable-enrollment.sh --server-name NAME."
 echo ""
 echo "  Docker commands (run from $(pwd)):"
 echo "    Logs:    docker logs -f ${TAK_CONTAINER}"

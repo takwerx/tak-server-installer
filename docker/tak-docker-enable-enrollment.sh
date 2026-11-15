@@ -26,6 +26,10 @@
 #   --yes              do not ask before restarting TAK Server
 #   --container NAME   the TAK Server container (only needed when there is more than one)
 #   --verify-user NAME ask for that existing TAK user's password (not saved) and prove enrollment: 8446 must answer HTTP 200
+#   --server-name NAMES  also make a new server certificate that names takserver and these addresses and host names (commas between them,
+#                      for example 203.0.113.10,tak.example.org). ATAK refuses a sign-in when the address its user typed is not in the
+#                      server certificate ("The TAK Server's identity could not be verified"), and installs made before this option
+#                      name only takserver. The old certificate files are kept in certs/files/server-cert-before-<time>. Restarts TAK Server.
 # Safe to run twice: when enrollment is already set up it says so and changes nothing.
 #==========================================================================
 
@@ -50,7 +54,7 @@ enable_enrollment() {
 }
 # END enable_enrollment
 
-# Copies (as_root and prune_health_list are copied from tak-docker-install.sh; the CI check .github/ci/test_docker_non_root.sh fails if the copies differ)
+# Copies (as_root, server_names and prune_health_list are copied from tak-docker-install.sh; the CI check .github/ci/test_docker_non_root.sh fails if the copies differ)
 # BEGIN as_root
 # Run a command as root: directly when the script already runs as root, through sudo otherwise.
 # Needed for ownership changes (chown/chgrp to another user or group), which a normal user cannot make.
@@ -62,6 +66,65 @@ as_root() {
     fi
 }
 # END as_root
+# BEGIN server_names
+# The names in the TAK Server certificate (ops #789). ATAK checks the address a user types against the names in the server certificate on
+# 8446 and refuses the sign-in when it is not there ("The TAK Server's identity could not be verified"). makeCert.sh puts one name in:
+# the name it is given, which here is takserver, so only "takserver" worked. These two functions add the addresses and names the users type.
+# The same functions are in docker/tak-docker-enable-enrollment.sh, for installs made before (the CI check test_docker_server_names.sh
+# fails if the two copies differ). Both need $DOCKER and err.
+
+# Prints the extra name lines (IP.2, DNS.2, ...) for a list of IPv4 addresses and host names split by commas or spaces. takserver is the
+# first name already (DNS.1), so it and repeats are skipped. Prints nothing and returns 1 for anything else (an IPv6 address, a * name, a space).
+server_alt_lines() {
+    local list="${1//,/ }" item lower o ip=1 dns=1 seen=" takserver " out=""
+    for item in $list; do
+        lower=$(printf '%s' "$item" | tr 'A-Z' 'a-z')
+        case "$seen" in *" $lower "*) continue ;; esac
+        if [[ "$item" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]]; then
+            for o in 1 2 3 4; do
+                [ "$((10#${BASH_REMATCH[$o]}))" -le 255 ] || { err "'$item' is not an IP address (a part is over 255)."; return 1; }
+            done
+            ip=$((ip + 1)); out+="IP.${ip} = ${item}"$'\n'
+        elif [[ "$item" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$ ]]; then
+            dns=$((dns + 1)); out+="DNS.${dns} = ${item}"$'\n'
+        else
+            err "'$item' is not an IPv4 address or a host name (letters, digits, dots and dashes only)."; return 1
+        fi
+        seen+="$lower "
+    done
+    printf '%s' "$out"
+}
+
+# Makes the server certificate (takserver.pem, .key, .jks, .p12) in the TAK Server container with "takserver" and the given names in
+# its name list. Arguments: CONTAINER NAMES. It runs a copy of the bundle's makeCert.sh with the extra lines added to the name list
+# (the bundle's own file is not changed). Checks the result by reading the names back: makeCert.sh exits 0 even when it fails.
+make_server_cert() {
+    local container="$1" lines name shown
+    lines=$(server_alt_lines "${2:-}") || return 1
+    $DOCKER exec -u root -e ALT_LINES="$lines" -e MATCH='$ALTNAMEFIELD = $SNAME' "$container" bash -c '
+        cd /opt/tak/certs || exit 2
+        n=0
+        while IFS= read -r l || [ -n "$l" ]; do
+            printf "%s\n" "$l"
+            if [ "$l" = "$MATCH" ]; then n=$((n + 1)); [ -z "$ALT_LINES" ] || printf "%s\n" "$ALT_LINES"; fi
+        done < makeCert.sh > makeCert-names.sh
+        if [ "$n" -ne 1 ]; then echo "makeCert.sh has an unexpected name list (found the marker $n times)"; rm -f makeCert-names.sh; exit 3; fi
+        chmod 755 makeCert-names.sh
+        ./makeCert-names.sh server takserver
+        rc=$?
+        rm -f makeCert-names.sh
+        exit $rc' || { err "makeCert.sh could not make the server certificate."; return 1; }
+    $DOCKER exec -u root "$container" test -s /opt/tak/certs/files/takserver.jks \
+        || { err "makeCert.sh did not make takserver.jks."; return 1; }
+    shown=$($DOCKER exec -u root "$container" openssl x509 -noout -ext subjectAltName -in /opt/tak/certs/files/takserver.pem 2>/dev/null)
+    for name in $(printf '%s' "$lines" | sed 's/^[A-Z]*\.[0-9]* = //'); do
+        case "$shown" in
+            *"$name"*) ;;
+            *) err "The server certificate does not name $name. Its names: ${shown//$'\n'/ }"; return 1 ;;
+        esac
+    done
+}
+# END server_names
 # BEGIN prune_health_list
 # The 5.8 hardened health checks also checksum a list of files (tak/health/<name>/critical_file_list.txt) and fail
 # when one is missing. That list names /usr/share/crypto-policies/back-ends/*/openssl.config, which the current
@@ -160,14 +223,48 @@ wait_for_enrollment() {
     return 1
 }
 
+# Makes a new server certificate that names takserver and NAMES (see server_names above), then restarts TAK Server. The old files go to
+# certs/files/server-cert-before-<time>, and come back when the new certificate cannot be made. Arguments: CONTAINER NAMES.
+reissue_server_cert() {
+    local container="$1" names="$2" keep
+    keep="server-cert-before-$(date +%Y%m%d-%H%M%S)"
+    server_alt_lines "$names" > /dev/null || return 1
+    $DOCKER exec -u root -e KEEP="$keep" "$container" bash -c 'cd /opt/tak/certs/files && test -s takserver.jks && mkdir -p "$KEEP" && cp -a takserver.* takserver-trusted.pem "$KEEP"/ && rm -f takserver.jks takserver.p12 takserver.key takserver.key.pk8 takserver.pem takserver.csr takserver-trusted.pem takserver-temp.p12 config-takserver.cfg' \
+        || { err "Could not keep the old server certificate (is it takserver.jks in certs/files?). Nothing was changed."; return 1; }
+    if ! make_server_cert "$container" "$names"; then
+        $DOCKER exec -u root -e KEEP="$keep" "$container" bash -c 'cd /opt/tak/certs/files && rm -f takserver.* takserver-trusted.pem && cp -a "$KEEP"/. .'
+        err "The old server certificate is back (a copy stays in certs/files/$keep)."
+        return 1
+    fi
+    fix_cert_folder "$container" force || true
+    log "New server certificate made. The old files are in certs/files/$keep."
+}
+
+# What an ATAK user needs besides the server address: the CA file in ATAK, and an address that is in the server certificate.
+print_atak_help() {
+    local cfg="$1" files="$2" name p12
+    name=$(grep -o 'truststoreFile="[^"]*"' "$cfg" | head -n 1 | sed 's|.*/||; s|\.jks"$||')
+    p12="$files/${name}.p12"
+    echo ""
+    if [ -s "$p12" ]; then
+        echo "  Give ATAK this CA file (password: atakatak):"
+        echo "      $p12"
+        echo "  The easiest way for many phones is a data package: DEPLOYMENT-GUIDE.md, 'Signing in from ATAK'."
+        echo "  Without it ATAK says: self-signed certificate in certificate chain."
+    fi
+    echo "  In ATAK, type an address that is in the server certificate. Any other ends in: The TAK Server's identity could not be verified."
+    echo "  To add an address or name: run this script again with --server-name NAME (commas between several)."
+}
+
 main() {
-    local ASSUME_YES=false CONTAINER="" DOCKER
+    local ASSUME_YES=false CONTAINER="" DOCKER SERVER_NAMES=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --yes|-y) ASSUME_YES=true ;;
             --container) CONTAINER="${2:-}"; shift ;;
             --verify-user) TAK_VERIFY_USER="${2:-}"; shift ;;
-            -h|--help) sed -n 2,36p "$0"; return 0 ;;
+            --server-name) SERVER_NAMES="${2:-}"; shift ;;
+            -h|--help) sed -n 2,40p "$0"; return 0 ;;
             *) err "Unknown option: $1 (see --help)"; return 2 ;;
         esac
         shift
@@ -224,6 +321,24 @@ main() {
     done
     $pruned && echo "  The health check runs every 30 seconds: look at docker ps again in a minute or two."
 
+    # --- a new server certificate with the addresses ATAK users type (only when asked for with --server-name)
+    if [ -n "$SERVER_NAMES" ]; then
+        server_alt_lines "$SERVER_NAMES" > /dev/null || return 1
+        echo ""
+        echo "  This makes a new server certificate that names takserver and: $(printf '%s' "$(server_alt_lines "$SERVER_NAMES")" | sed 's/^[A-Z]*\.[0-9]* = //' | tr '\n' ' ')"
+        echo "  and restarts TAK Server (about a minute). Connected clients reconnect on their own."
+        if [ "$ASSUME_YES" != true ]; then
+            local ANS
+            read -r -p "  Continue? [y/N] " ANS
+            case "$ANS" in y|Y|yes|YES) ;; *) echo "Cancelled. Nothing was changed."; return 1 ;; esac
+        fi
+        reissue_server_cert "$CONTAINER" "$SERVER_NAMES" || return 1
+        log "Restarting TAK Server..."
+        $DOCKER restart "$CONTAINER" > /dev/null
+        wait_for_enrollment || { err "After the restart 8446 answered HTTP ${LAST_CODE:-none}. Look at: docker logs $CONTAINER"; return 1; }
+        log "TAK Server is back and 8446 answers (HTTP ${LAST_CODE})."
+    fi
+
     # --- already set up? Then change nothing.
     if has_active_enrollment "$CFG"; then
         log "CoreConfig.xml already has a certificateSigning block: enrollment needs no change."
@@ -235,6 +350,7 @@ main() {
         else
             log "To confirm sign-in works, run this again with --verify-user NAME (an existing TAK user)."
         fi
+        print_atak_help "$CFG" "$FILES"
         return 0
     fi
 
@@ -316,6 +432,7 @@ main() {
         echo "  Add users in the TAK Server web UI (https://<this server>:8443) or with UserManager, then in ATAK:"
         echo "  Settings > Network Preferences > TAK Server > enter the server address, turn on 'Use Authentication',"
         echo "  and enroll with the username and password."
+        print_atak_help "$CFG" "$FILES"
         echo "  To undo: cp $BACKUP $CFG && docker restart $CONTAINER"
         return 0
     fi

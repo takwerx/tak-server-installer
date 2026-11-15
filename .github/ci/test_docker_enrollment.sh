@@ -131,7 +131,7 @@ if enable_enrollment "$work/nope.xml" X Y Z 2>/dev/null; then fail "enable_enrol
 line_of() { grep -n -m1 -E -- "$1" "$INSTALL" | cut -d: -f1; }
 l_root=$(line_of 'makeRootCa\.sh')
 l_int=$(line_of 'makeCert\.sh ca \$\{INTERMEDIATE_CA_NAME\}')
-l_srv=$(line_of 'makeCert\.sh server ')
+l_srv=$(line_of '^make_server_cert "\$TAK_CONTAINER" ')
 l_cli=$(line_of 'makeCert\.sh client ')
 l_call=$(line_of '^enable_enrollment tak/CoreConfig\.xml ')
 l_rst=$(line_of '^\$DOCKER restart "\$TAK_CONTAINER"')
