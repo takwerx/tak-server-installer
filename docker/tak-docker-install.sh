@@ -109,7 +109,7 @@ echo ""
 #----------------------------------------------------------------------
 # Configuration - edit these before running
 #----------------------------------------------------------------------
-CA_NAME="Yankee1"
+CA_NAME="Ops789CA"
 INTERMEDIATE_CA_NAME="${CA_NAME}-Intermediate"   # signs the server and client certificates, and the certificates ATAK users enroll for on 8446
 ADMIN_CERT="admin"
 CERT_PASS="atakatak"                       # default TAK cert password
