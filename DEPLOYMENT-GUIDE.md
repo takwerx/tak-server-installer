@@ -145,6 +145,11 @@ chmod +x Ubuntu_22.04_Caddy_setup.sh
 chmod +x Ubuntu_22.04_TAK_Server_Hardening.sh
 ```
 
+> **Updating the scripts later:** run `git pull` in `~/tak-server-installer`. If git stops with "Your local changes to the following files would be overwritten by merge" for one of the Ubuntu scripts, the only change is the `chmod +x` above (the scripts are now stored as executable, so newer copies do not have this problem). Run this once instead, which ignores the permission change and keeps any real edit you made:
+> ```bash
+> git -c core.fileMode=false pull
+> ```
+
 **For Rocky Linux 9 / RHEL 9:**
 ```bash
 cd ~/tak-server-installer/rocky-9
@@ -303,7 +308,7 @@ What the guide expects at a high level (matches `docker/tak-docker-install.sh`):
 4. `docker run` the DB container with **`--network-alias tak-database`** (Compose in this repo uses the same alias on a user-defined network).
 5. `docker build` for **`takserver`** using `docker/Dockerfile.takserver`.
 6. `docker run` the TAK Server container with the published ports (8089, 8443, 8446 open; 8444, 9000, 9001 on this machine only unless you turn federation on, see [Published ports](#published-ports-and-the-docker-firewall)).
-7. Configure **`tak/certs/cert-metadata.sh`**, generate CA and certs inside the container, then **`./configureInDocker.sh`**, tail **`tak/logs/`** from the host, and run **UserManager** to authorize the admin client PEM.
+7. Configure **`tak/certs/cert-metadata.sh`**, generate the root CA, an intermediate (signing) CA and the server and admin certs inside the container, turn on certificate enrollment on 8446 (a `certificateSigning` block in `CoreConfig.xml`), restart the container (`docker restart`), tail **`tak/logs/`** from the host, and run **UserManager** to authorize the admin client PEM.
 
 For the newest PDF, always check [TAK.gov](https://tak.gov) in case the bundled copy is behind your deployment.
 
@@ -341,6 +346,37 @@ The script:
 1. Installs Docker if missing (apt or dnf), configures `CoreConfig.xml` and `cert-metadata.sh`, builds `takserver-db` and `takserver` images, runs containers, generates certificates, and promotes the admin client.
 
 Edit variables at the top of `docker/tak-docker-install.sh` (CA name, org fields, cert password, etc.) before running.
+
+The script asks one question about ATAK: **the address or name your ATAK users will type to reach the server**. Press Enter to use this machine's own address. If your users connect by the public address or a host name, type it here (several: separate them with commas). It goes into the server certificate. To skip the question, set `TAK_SERVER_NAMES` first, for example `TAK_SERVER_NAMES=203.0.113.10,tak.example.org ./docker/tak-docker-install.sh`. IPv4 addresses and plain host names work (no `*` names, no IPv6).
+
+### Signing in from ATAK with a username and password (port 8446)
+
+Two things must be true on each phone, or ATAK refuses the sign-in:
+
+1. **The address ATAK users type is in the server certificate.** ATAK compares it with the names in the certificate. The installer puts `takserver`, this machine's address and the names you gave it there. Any other address ends in *The TAK Server's identity could not be verified* (the log says *no alternative certificate subject name matches target ipv4 address*).
+2. **ATAK trusts the installer's CA.** ATAK does not know it. The file is `tak/certs/files/truststore-<CA name>-Intermediate.p12` (for the default name: `truststore-Yankee1-Intermediate.p12`, password `atakatak`). Without it ATAK ends with *self-signed certificate in certificate chain*. Give it to ATAK in one of two ways:
+   - **A data package (best for many phones).** Make a zip with the CA file in `certs/`, a `MANIFEST/manifest.xml`, and a `config.pref` that defines the server and its CA, then send it to the phones (or copy it to `atak/tools/datapackage/` on the phone). ATAK adds the server, trusts the CA for it and asks for the username and password:
+
+     ```xml
+     <preferences>
+       <preference version="1" name="cot_streams">
+         <entry key="count" class="class java.lang.Integer">1</entry>
+         <entry key="description0" class="class java.lang.String">My TAK Server</entry>
+         <entry key="enabled0" class="class java.lang.Boolean">true</entry>
+         <entry key="connectString0" class="class java.lang.String">ADDRESS:8089:ssl</entry>
+         <entry key="caLocation0" class="class java.lang.String">cert/truststore-Yankee1-Intermediate.p12</entry>
+         <entry key="caPassword0" class="class java.lang.String">atakatak</entry>
+         <entry key="enrollForCertificateWithTrust0" class="class java.lang.Boolean">true</entry>
+         <entry key="useAuth0" class="class java.lang.Boolean">true</entry>
+         <entry key="cacheCreds0" class="class java.lang.String">Cache credentials</entry>
+       </preference>
+     </preferences>
+     ```
+
+     `ADDRESS` is one of the names in the server certificate. The manifest lists both files (`config.pref` and `certs/<file>.p12`).
+   - **By hand on one phone.** Copy the CA file to `atak/cert/` on the phone. In ATAK set **Settings > Network Preferences > Network Connection Preferences > Default SSL/TLS TrustStore Password** to `atakatak`, then pick the file under **Default SSL/TLS TrustStore Location**.
+
+Then add a user (web UI or UserManager) and, in ATAK, enter the server address, turn on *Use Authentication* and enroll with that user and password.
 
 ### Compose (optional)
 
@@ -395,6 +431,67 @@ sudo ./docker/tak-docker-firewall.sh persist 8089 8443 8446
 docker ps --format '{{.Names}}\t{{.Ports}}'          # want 8444, 9000, 9001 shown as 127.0.0.1:...
 sudo iptables -S TAK-DOCKER-FW                       # want RETURN for 8089, 8443, 8446, then DROP
 ```
+
+### Installed with v1.0.1 or older? Turn on ATAK sign-in (port 8446) and fix certificates and health
+
+Docker installs made with an installer older than v1.0.2 have no certificate enrollment set up. ATAK users who type the server address, a username and a password get no certificate (8446 answers HTTP 500). Running `tak-docker-install.sh` again does not fix it: it stops at the existing database container and changes nothing, on purpose, because a re-run would delete the data.
+
+Get the new scripts (`git pull`), then run this on the machine that runs TAK Server:
+
+```
+sudo ./docker/tak-docker-enable-enrollment.sh
+```
+
+Use `sudo`. If you installed with `sudo` (most people did), the `tak/` folder belongs to root and a normal user cannot change `CoreConfig.xml` there. Without `sudo` the script stops before it changes anything and tells you to run it again with `sudo`.
+
+It makes an intermediate signing CA under your root CA, adds the `certificateSigning` block to `tak/CoreConfig.xml` (the old file is kept beside it, with the date in its name) and restarts the TAK Server container, which takes about a minute. The database, users, existing certificates and ports are not changed, and `ca.pem` stays your root CA, so certificates you make later with `makeCert.sh` are signed as before. If TAK Server does not come back, the script puts the old `CoreConfig.xml` back and restarts it again.
+
+The same script also brings an old Docker install in line with v1.0.2 in two more ways. It does them whether or not enrollment is already on, and they need no restart:
+
+- **Certificates made inside the container.** `tak/certs/files` gets group 0 and group write, and the private keys get group read (the folder keeps the same owner). Before, `docker exec <container> bash -c "cd /opt/tak/certs && ./makeCert.sh client NAME"` printed `Permission denied` and made no `.p12`, although it ended with exit code 0. Always check that `NAME.p12` is there. Group 0 on the host is root only, so other users on the machine still cannot read the keys.
+- **`(unhealthy)` in `docker ps`.** The 5.8 hardened health check also lists a system file that the image no longer has, so both containers stayed `(unhealthy)` while TAK Server worked. The script removes the missing entries from `tak/health/*/critical_file_list.txt` (the original is kept as `critical_file_list.txt.orig`). `docker ps` shows `(healthy)` within a minute or two.
+
+**Installs made before this fix name only `takserver` in the server certificate.** ATAK then refuses an address or host name. The same script can make a new server certificate with the names you give it:
+
+```
+sudo ./docker/tak-docker-enable-enrollment.sh --server-name 203.0.113.10,tak.example.org
+```
+
+List every address and name your users type: the new certificate names `takserver` and the names you give, nothing else.
+
+It keeps the old certificate files in `tak/certs/files/server-cert-before-<time>`, makes the new one with the same CA (phones that trust the CA keep working) and restarts TAK Server. If the new certificate cannot be made, the old files come back. It works on its own too, even when enrollment is already on. At the end it prints the CA file to load into ATAK (see above).
+
+To prove enrollment works, add `--verify-user NAME` with an existing TAK user. The script asks for that user's password (it is not saved) and checks that 8446 answers HTTP 200 for it. Without that option, sign in once from an ATAK device. Running the script a second time changes nothing.
+
+To undo it: `cp tak/CoreConfig.xml.before-enrollment-<date> tak/CoreConfig.xml && docker restart takserver-<VERSION>`.
+
+### Database image and PostgreSQL updates
+
+PostgreSQL ships bug and security fixes as new minor versions (for example 15.20 and 18.7). The installer builds the TAK Server database image **once**, at install time, so a Docker install keeps the PostgreSQL version it was built with until you rebuild the image. Running the installer again does not help: it stops at the existing database container on purpose, because a re-run would delete the data.
+
+Get the new scripts (`git pull`), then run this on the machine that runs TAK Server:
+
+```
+./docker/tak-docker-update-db.sh
+```
+
+What it does:
+
+1. Rebuilds the database image from the bundle you installed with (`--pull --no-cache`, so it takes the newest base image and PostgreSQL packages). TAK Server keeps running during the build, which takes a few minutes.
+2. Compares versions. If the rebuilt image has the same PostgreSQL as the running database it says `Already up to date` and changes nothing. PostgreSQL publishes new minor versions often: run the script now and then, and after each release.
+3. Writes a full backup (`tak-db-backup-<version>-<date>.sql`, readable by its owner only) next to the `tak` folder.
+4. Stops TAK Server and the database, keeps the old database container and image under new names, and starts a new database container from the new image on the same data (the same mounted folder, network and loopback-only port 5432). TAK Server is down for about 2 to 5 minutes. Clients reconnect on their own.
+5. Checks that the database reports the new version, has the same tables and at least the same rows, and that TAK Server holds a connection to it. If any check fails it puts the old container and image back and starts them.
+
+It asks once before stopping TAK Server; `--yes` skips the question and `--force` swaps even when the version is the same. When you are sure all is well (a few days), free the space with the two commands it prints (`docker rm ...` and `docker rmi ...`). The data is not copied: the new container uses the same data folder, and a PostgreSQL minor version reads the same data as the one before.
+
+It changes nothing, and says so, when:
+
+- the data lives **inside** the database container (standard 5.6/5.7 bundles): a new container would start empty. Take a backup with `docker exec -u postgres takserver-db-<VERSION> pg_dumpall > tak-db-backup.sql` and keep the install as it is. A tested update path for these installs is not available yet.
+- the install was made with **Docker Compose**: Compose would put the old container back. Rebuild the image with `docker build --pull --no-cache` from the bundle folder and recreate the `takserver-db` service by hand, keeping the data volume.
+- the bundle folder (with `docker/` and `tak/`) is gone: unzip the TAK Server ZIP again in the same place.
+
+New installs need nothing: the installer now builds the database image with `--pull --no-cache`, so a re-install never reuses an old base image or old layers.
 
 ### Database port (5432)
 
@@ -1182,6 +1279,24 @@ VPS Provider:
 - Use private networking
 - Configure snapshots/backups
 - Enable monitoring
+
+### Keeping PostgreSQL up to date (Ubuntu script installs)
+
+The Ubuntu script installs PostgreSQL from the PostgreSQL project's own apt repository (PGDG), not from Ubuntu. TAK Server 5.8 uses PostgreSQL 18. PostgreSQL ships bug and security fixes as new minor versions (for example 18.7).
+
+Ubuntu's automatic updates (`unattended-upgrades`) cover only Ubuntu's own packages and security updates. They do **not** cover the PostgreSQL repository, so these fixes reach your server only when you install them. Do it now and then, and after each PostgreSQL release:
+
+```bash
+sudo apt-get update
+apt list --upgradable 2>/dev/null | grep -i postgres      # what is newer
+sudo apt-get install --only-upgrade 'postgresql*'          # only the PostgreSQL packages that are already installed
+sudo -u postgres psql -tAc "show server_version"           # the new version
+```
+
+PostgreSQL restarts during the upgrade. On the test server (TAK Server 5.8, PostgreSQL 18.6 to 18.7) the database was away for about 5 seconds, TAK Server stayed running and reconnected by itself, and no restart was needed. Pick a quiet time anyway: clients that send data at that moment can see a short pause.
+
+Other packages stay as they are: this does not run a full `apt upgrade`. The TAK Server package itself is not updated by it; TAK Server updates come from tak.gov.
+
 
 ## SECTION 6: TESTING GUARD DOGS
 

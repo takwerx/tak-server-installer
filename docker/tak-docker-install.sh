@@ -27,6 +27,78 @@ warn() { echo -e "${YEL}[!]${NC} $1"; }
 err()  { echo -e "${RED}[ERROR]${NC} $1"; }
 step() { echo -e "\n${CYN}=== STEP $1 ===${NC}"; }
 
+# BEGIN as_root
+# Run a command as root: directly when the script already runs as root, through sudo otherwise.
+# Needed for ownership changes (chown/chgrp to another user or group), which a normal user cannot make.
+as_root() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
+# END as_root
+
+# BEGIN server_names
+# The names in the TAK Server certificate (ops #789). ATAK checks the address a user types against the names in the server certificate on
+# 8446 and refuses the sign-in when it is not there ("The TAK Server's identity could not be verified"). makeCert.sh puts one name in:
+# the name it is given, which here is takserver, so only "takserver" worked. These two functions add the addresses and names the users type.
+# The same functions are in docker/tak-docker-enable-enrollment.sh, for installs made before (the CI check test_docker_server_names.sh
+# fails if the two copies differ). Both need $DOCKER and err.
+
+# Prints the extra name lines (IP.2, DNS.2, ...) for a list of IPv4 addresses and host names split by commas or spaces. takserver is the
+# first name already (DNS.1), so it and repeats are skipped. Prints nothing and returns 1 for anything else (an IPv6 address, a * name, a space).
+server_alt_lines() {
+    local list="${1//,/ }" item lower o ip=1 dns=1 seen=" takserver " out=""
+    for item in $list; do
+        lower=$(printf '%s' "$item" | tr 'A-Z' 'a-z')
+        case "$seen" in *" $lower "*) continue ;; esac
+        if [[ "$item" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]]; then
+            for o in 1 2 3 4; do
+                [ "$((10#${BASH_REMATCH[$o]}))" -le 255 ] || { err "'$item' is not an IP address (a part is over 255)."; return 1; }
+            done
+            ip=$((ip + 1)); out+="IP.${ip} = ${item}"$'\n'
+        elif [[ "$item" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$ ]]; then
+            dns=$((dns + 1)); out+="DNS.${dns} = ${item}"$'\n'
+        else
+            err "'$item' is not an IPv4 address or a host name (letters, digits, dots and dashes only)."; return 1
+        fi
+        seen+="$lower "
+    done
+    printf '%s' "$out"
+}
+
+# Makes the server certificate (takserver.pem, .key, .jks, .p12) in the TAK Server container with "takserver" and the given names in
+# its name list. Arguments: CONTAINER NAMES. It runs a copy of the bundle's makeCert.sh with the extra lines added to the name list
+# (the bundle's own file is not changed). Checks the result by reading the names back: makeCert.sh exits 0 even when it fails.
+make_server_cert() {
+    local container="$1" lines name shown
+    lines=$(server_alt_lines "${2:-}") || return 1
+    $DOCKER exec -u root -e ALT_LINES="$lines" -e MATCH='$ALTNAMEFIELD = $SNAME' "$container" bash -c '
+        cd /opt/tak/certs || exit 2
+        n=0
+        while IFS= read -r l || [ -n "$l" ]; do
+            printf "%s\n" "$l"
+            if [ "$l" = "$MATCH" ]; then n=$((n + 1)); [ -z "$ALT_LINES" ] || printf "%s\n" "$ALT_LINES"; fi
+        done < makeCert.sh > makeCert-names.sh
+        if [ "$n" -ne 1 ]; then echo "makeCert.sh has an unexpected name list (found the marker $n times)"; rm -f makeCert-names.sh; exit 3; fi
+        chmod 755 makeCert-names.sh
+        ./makeCert-names.sh server takserver
+        rc=$?
+        rm -f makeCert-names.sh
+        exit $rc' || { err "makeCert.sh could not make the server certificate."; return 1; }
+    $DOCKER exec -u root "$container" test -s /opt/tak/certs/files/takserver.jks \
+        || { err "makeCert.sh did not make takserver.jks."; return 1; }
+    shown=$($DOCKER exec -u root "$container" openssl x509 -noout -ext subjectAltName -in /opt/tak/certs/files/takserver.pem 2>/dev/null)
+    for name in $(printf '%s' "$lines" | sed 's/^[A-Z]*\.[0-9]* = //'); do
+        case "$shown" in
+            *"$name"*) ;;
+            *) err "The server certificate does not name $name. Its names: ${shown//$'\n'/ }"; return 1 ;;
+        esac
+    done
+}
+# END server_names
+
 echo ""
 echo "============================================="
 echo "  TAK Server Docker Install"
@@ -38,6 +110,7 @@ echo ""
 # Configuration - edit these before running
 #----------------------------------------------------------------------
 CA_NAME="Yankee1"
+INTERMEDIATE_CA_NAME="${CA_NAME}-Intermediate"   # signs the server and client certificates, and the certificates ATAK users enroll for on 8446
 ADMIN_CERT="admin"
 CERT_PASS="atakatak"                       # default TAK cert password
 INSTALL_DIR="${HOME}/tak-docker"           # working directory
@@ -68,19 +141,91 @@ install_docker_apt() {
     sudo systemctl enable --now docker
 }
 
-install_docker_dnf() {
-    sudo dnf install -y docker
-    sudo dnf install -y docker-buildx-plugin || warn "docker-buildx-plugin not available from the enabled repos."
-    sudo systemctl enable --now docker
+# Rocky, RHEL, Alma and CentOS do not ship Docker. "dnf install docker" there installs podman-docker, a shim that runs Podman
+# under the name "docker" and has no docker.service, so "systemctl enable --now docker" failed (ops #727). These hosts get Docker CE
+# from Docker's own repo. Fedora has a repo of its own. Any other dnf host (Amazon Linux, for example) keeps its distro "docker".
+# BEGIN docker_engine (the CI check .github/ci/test_docker_engine.sh runs exactly these functions)
+OS_RELEASE_FILE="${OS_RELEASE_FILE:-/etc/os-release}"
+
+# True when the "docker" command is Podman's Docker-compatible shim (the podman-docker package), not Docker.
+docker_is_podman() {
+    local out
+    command -v docker &>/dev/null || return 1
+    out="$(docker --version 2>&1; readlink -f "$(command -v docker)" 2>/dev/null)"
+    case "$out" in
+        *[Pp]odman*) return 0 ;;
+    esac
+    return 1
 }
 
+# Prints rhel or fedora: the folder of Docker's repo for this OS. Prints nothing for any other OS.
+docker_ce_repo_flavor() {
+    local id="" like=""
+    if [ -r "$OS_RELEASE_FILE" ]; then
+        # shellcheck source=/dev/null
+        id=$(. "$OS_RELEASE_FILE" && echo "${ID:-}")
+        # shellcheck source=/dev/null
+        like=$(. "$OS_RELEASE_FILE" && echo "${ID_LIKE:-}")
+    fi
+    # Rocky and Alma list fedora in ID_LIKE too, so the OS's own ID is checked first.
+    if [ "$id" = fedora ]; then
+        echo fedora
+        return 0
+    fi
+    case " $id $like " in
+        *" rhel "*|*" centos "*) echo rhel ;;
+    esac
+    return 0
+}
+
+install_docker_dnf() {
+    local flavor
+    flavor=$(docker_ce_repo_flavor)
+    if [ -n "$flavor" ]; then
+        log "Installing Docker CE from Docker's repo (download.docker.com/linux/${flavor})"
+        command -v curl &>/dev/null || sudo dnf install -y curl
+        sudo curl -fsSL "https://download.docker.com/linux/${flavor}/docker-ce.repo" -o /etc/yum.repos.d/docker-ce.repo || {
+            err "Could not download Docker's repo file from download.docker.com. Check this machine's internet access, then re-run."
+            return 1
+        }
+        # podman-docker owns /usr/bin/docker and conflicts with Docker CE. Podman itself stays installed.
+        if rpm -q podman-docker &>/dev/null; then
+            warn "Removing podman-docker (a stand-in for the docker command). Podman itself stays."
+            sudo dnf remove -y podman-docker
+        fi
+        sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    else
+        sudo dnf install -y docker
+        sudo dnf install -y docker-buildx-plugin || warn "docker-buildx-plugin not available from the enabled repos."
+    fi
+    # Never call enable on a service that is not there: say what is wrong instead of a bare systemctl error.
+    if ! systemctl cat docker.service &>/dev/null; then
+        err "No docker.service after the install, so this is not Docker (a Podman stand-in has none)."
+        echo "  Install Docker CE for this OS (https://docs.docker.com/engine/install/), then re-run."
+        return 1
+    fi
+    sudo systemctl enable --now docker
+}
+# END docker_engine
+
 # Docker
+NEED_DOCKER=0
 if ! command -v docker &>/dev/null; then
     warn "Docker not found. Installing..."
+    NEED_DOCKER=1
+elif docker_is_podman; then
+    warn "The docker command on this machine is Podman's stand-in (podman-docker), not Docker. TAK Server's Docker install needs Docker."
+    if ! command -v dnf &>/dev/null; then
+        err "Remove the podman-docker package and install Docker for this OS (https://docs.docker.com/engine/install/), then re-run."
+        exit 1
+    fi
+    NEED_DOCKER=1
+fi
+if [ "$NEED_DOCKER" -eq 1 ]; then
     if command -v apt-get &>/dev/null; then
         install_docker_apt
     elif command -v dnf &>/dev/null; then
-        install_docker_dnf
+        install_docker_dnf || exit 1
     else
         err "Install Docker manually for this OS, then re-run."
         exit 1
@@ -237,6 +382,30 @@ fi
 log "Using: ${NIC_NAME} → ${SERVER_IP}"
 
 #----------------------------------------------------------------------
+# 2b. The address or name ATAK users will type (goes into the server certificate, ops #789)
+#----------------------------------------------------------------------
+# ATAK checks what a user types as the server address against the names in the server certificate, so an address that is not in it
+# ends in "The TAK Server's identity could not be verified". This box's own address is always in it. Add the public address or the
+# host name your users type (several: separate them with commas). Set TAK_SERVER_NAMES to skip the question.
+if [ -z "${TAK_SERVER_NAMES:-}" ]; then
+    echo ""
+    echo "ATAK checks the address your users type against the server certificate."
+    echo "Type the address or name they will use to reach this server (several: separate with commas)."
+    echo "Examples: 203.0.113.10   tak.example.org"
+    while :; do
+        read -r -p "Address or name for ATAK users [${SERVER_IP}]: " TAK_SERVER_NAMES || true
+        TAK_SERVER_NAMES=${TAK_SERVER_NAMES:-$SERVER_IP}
+        server_alt_lines "${TAK_SERVER_NAMES},${SERVER_IP}" > /dev/null && break
+        TAK_SERVER_NAMES=""
+        [ -t 0 ] || exit 1
+    done
+fi
+CERT_NAMES="${TAK_SERVER_NAMES},${SERVER_IP}"
+CERT_NAME_LINES=$(server_alt_lines "$CERT_NAMES") || { err "TAK_SERVER_NAMES is not usable (see above)."; exit 1; }
+CERT_NAMES_SHOWN="takserver $(printf '%s' "$CERT_NAME_LINES" | sed 's/^[A-Z]*\.[0-9]* = //' | tr '\n' ' ')"
+log "The server certificate will name: ${CERT_NAMES_SHOWN}"
+
+#----------------------------------------------------------------------
 # 3. Extract ZIP
 #----------------------------------------------------------------------
 step "3: Extract TAK Server Docker ZIP"
@@ -246,8 +415,20 @@ cd "$INSTALL_DIR"
 log "Extracting $(basename "$TAK_ZIP")..."
 unzip -o "$TAK_ZIP"
 
-# Find extracted dir - could be takserver-docker-X.X-RELEASE-XX or similar
-TAK_DIR=$(find . -maxdepth 1 -type d -name 'takserver-docker*' -print 2>/dev/null | sort -r | head -1)
+# Find extracted dir - could be takserver-docker-X.X-RELEASE-XX or similar.
+# Use the top-level folder named inside the ZIP you chose, so another bundle extracted here earlier (a standard one
+# next to a hardened one, or an older release) is never picked by mistake. (Fix from tranzmatt, PR #30.)
+# BEGIN pick_tak_dir
+pick_tak_dir() {  # ZIP -> the folder it extracted, relative to the current folder
+    local dir
+    dir=$(unzip -Z1 "$1" 2>/dev/null | head -1 | cut -d/ -f1)
+    if [ -z "$dir" ] || [ ! -d "$dir/tak" ]; then
+        dir=$(find . -maxdepth 1 -type d -name 'takserver-docker*' -print 2>/dev/null | sort -r | head -1)
+    fi
+    echo "$dir"
+}
+# END pick_tak_dir
+TAK_DIR=$(pick_tak_dir "$TAK_ZIP")
 if [ -z "$TAK_DIR" ]; then
     # Some ZIPs extract without a top-level directory
     if [ -d "tak" ]; then
@@ -272,6 +453,12 @@ if [ -d "tak" ]; then
     # "tee: /opt/tak/logs/takserver.log: Permission denied" and "AccessDeniedException: TAKIgniteConfig.xml".
     # Give group 0 write access (harmless for 5.6/5.7, whose containers run as root).
     chmod -R g+rwX tak
+    # Unzipped by a normal user, tak/ belongs to that user's own group, not group 0, so the write access above would
+    # not reach the containers. Hand the group to 0 (needs root); the files stay owned by this user.
+    if [ "$(id -u)" -ne 0 ]; then
+        log "Setting group 0 on tak/ so the containers can write to it (sudo)..."
+        as_root chgrp -R 0 tak
+    fi
 fi
 
 # Get version string from version.txt
@@ -310,6 +497,24 @@ sed -i "s|password=\"YourPasswordHere\"|password=\"${DB_PASS}\"|g" tak/CoreConfi
 log "Database password set: ${DB_PASS}"
 log "CoreConfig.xml ready"
 
+# Certificate enrollment on 8446 (ops #703). Without a <certificateSigning> block in CoreConfig.xml, 8446 answers
+# /Marti/api/tls/config with HTTP 500 ("CertificateSigning element not found in CoreConfig!") and an ATAK user who types the
+# server address, a username and a password gets no certificate. The 5.8 CoreConfig.example.xml only holds the block as a comment
+# (and has no <vbm/> line to hang it on, unlike the .deb), so the block is added before </Configuration>; the elements of
+# <Configuration> can be in any order. Also points the truststore at the intermediate CA's, which trusts the root and the
+# intermediate, so the certificates the intermediate signs are accepted on 8089.
+# BEGIN enable_enrollment (the CI check .github/ci/test_docker_enrollment.sh runs exactly this function)
+enable_enrollment() {
+    local cfg="$1" ica="$2" org="$3" ou="$4"
+    [ -f "$cfg" ] || { err "enable_enrollment: no $cfg"; return 1; }
+    if ! grep -q 'tak-server-installer: certificate enrollment' "$cfg"; then
+        # keystorePass is the password makeCert.sh gives the signing keystore (CAPASS, default atakatak)
+        sed -i "s|</Configuration>|<!-- tak-server-installer: certificate enrollment (8446) -->\\n<certificateSigning CA=\"TAKServer\">\\n<certificateConfig>\\n<nameEntries>\\n<nameEntry name=\"O\" value=\"${org}\"/>\\n<nameEntry name=\"OU\" value=\"${ou}\"/>\\n</nameEntries>\\n</certificateConfig>\\n<TAKServerCAConfig keystore=\"JKS\" keystoreFile=\"/opt/tak/certs/files/${ica}-signing.jks\" keystorePass=\"atakatak\" validityDays=\"3650\" signatureAlg=\"SHA256WithRSA\"/>\\n</certificateSigning>\\n</Configuration>|" "$cfg"
+    fi
+    sed -i "s|files/truststore-root\\.jks|files/truststore-${ica}.jks|" "$cfg"
+}
+# END enable_enrollment
+
 #----------------------------------------------------------------------
 # 5. Configure cert-metadata.sh
 #----------------------------------------------------------------------
@@ -336,38 +541,107 @@ step "6: Build TAK Server Database Image"
 
 log "Building takserver-db:${VERSION} ..."
 
-# Find the right Dockerfile - check in order of preference for ARM64
-ARCH=$(dpkg --print-architecture 2>/dev/null || uname -m)
+# BEGIN db_dockerfile
+# Picks the bundle's DB Dockerfile and writes the patched copies the DB image is built from. Used by this script (step 6) and by
+# docker/tak-docker-update-db.sh, which rebuilds the DB image on an existing install; the CI check .github/ci/test_docker_update_db.sh
+# fails if the two copies differ. Run from the extracted bundle folder (where docker/ and tak/ are). The functions use log, warn, err.
+DB_BASE_IMAGE="${DB_BASE_IMAGE-postgres:15-bookworm}"
+# >>> pgdg-major (ops #702; tested by .github/ci/test_db_pgdg_repo.sh)
+# The 5.8 hardened DB image starts FROM ubi10/ubi:10.2, but its own "dnf update" moves it to the newest RHEL minor
+# (10.3 since Nov 2026). PGDG's repo file reads baseurl=.../redhat/rhel-$releasever_major.$releasever_minor-$basearch
+# (older ones: rhel-$releasever-$basearch), and PGDG publishes a new minor's folder only some time after Red Hat ships
+# it. Until then every PGDG repo 404s and the image build stops at "dnf install ... pgdg-redhat-repo-latest.noarch.rpm".
+# This comes back at every RHEL minor. PGDG's rhel-<major> folder carries the same packages as its newest minor, and
+# the image is always on the newest minor, so the patched copy adds one RUN after every RUN that installs the
+# pgdg-redhat-repo rpm, pointing only the pgdg*.repo baseurls at rhel-<major>. UBI, EPEL and Rocky repos are untouched.
+# Same fix as infra-TAK's _patch_tak_db_pgdg_releasever. A Dockerfile without that rpm is built as shipped.
+PGDG_MAJOR_MARK='# tak-server-installer: PGDG repos on the EL major path (ops #702)'
+read -r -d '' PGDG_MAJOR_STEP <<'PGDG_EOF' || true
+RUN for f in /etc/yum.repos.d/pgdg*.repo; do [ -f "$f" ] && sed -i 's|/rhel-\$releasever[_a-z.$]*-\$basearch|/rhel-'"$(rpm -E %rhel)"'-$basearch|g' "$f"; done; true
+PGDG_EOF
+# Writes a copy of Dockerfile $1 to $2 with the step after each pgdg-redhat-repo RUN. Returns 1 if it added none.
+pgdg_major_patch() {
+    PGDG_STEP="${PGDG_MAJOR_MARK}"$'\n'"${PGDG_MAJOR_STEP}" awk '
+        { print }
+        !inrun && /^[[:space:]]*[Rr][Uu][Nn][[:space:]]/ { inrun = 1; blk = "" }
+        inrun {
+            blk = blk $0 "\n"
+            if ($0 !~ /\\[[:space:]]*$/) {
+                inrun = 0
+                if (blk ~ /pgdg-redhat-repo[^[:space:]"'\'']*\.rpm/) { print ENVIRON["PGDG_STEP"]; n++ }
+            }
+        }
+        END { exit (n ? 0 : 1) }' "$1" > "$2"
+}
+# <<< pgdg-major
 
-if [[ "$ARCH" == "arm64" || "$ARCH" == "aarch64" ]]; then
-    for df in \
-        "docker/Dockerfile.takserver-db-arm" \
-        "docker/Dockerfile.takserver-db.arm64" \
-        "docker/Dockerfile.hardened-takserver-db" \
-        "docker/Dockerfile.takserver-db"; do
-        if [ -f "$df" ]; then
-            DB_DOCKERFILE="$df"
-            break
+# Sets DB_DOCKERFILE to the bundle's own DB Dockerfile (the first that exists, ARM64 first on ARM). Returns 1 if there is none.
+select_db_dockerfile() {
+    local df
+    DB_DOCKERFILE=""
+    ARCH=$(dpkg --print-architecture 2>/dev/null || uname -m)
+
+    if [[ "$ARCH" == "arm64" || "$ARCH" == "aarch64" ]]; then
+        for df in \
+            "docker/Dockerfile.takserver-db-arm" \
+            "docker/Dockerfile.takserver-db.arm64" \
+            "docker/Dockerfile.hardened-takserver-db" \
+            "docker/Dockerfile.takserver-db"; do
+            if [ -f "$df" ]; then
+                DB_DOCKERFILE="$df"
+                break
+            fi
+        done
+    else
+        for df in \
+            "docker/Dockerfile.hardened-takserver-db" \
+            "docker/Dockerfile.takserver-db"; do
+            if [ -f "$df" ]; then
+                DB_DOCKERFILE="$df"
+                break
+            fi
+        done
+    fi
+
+    if [ -z "$DB_DOCKERFILE" ]; then
+        err "No database Dockerfile found in docker/"
+        ls docker/
+        return 1
+    fi
+
+    log "Using Dockerfile: ${DB_DOCKERFILE}"
+}
+
+# The standard 5.6/5.7 bundles build the DB image FROM postgres:15.1 (Debian bullseye), whose apt repo is retired, so that build fails.
+# The base swap and the PGDG fix go into patched copies; the bundle's own Dockerfile is left untouched. Updates DB_DOCKERFILE.
+patch_db_dockerfile() {
+    # postgres:15 / 15.x / 15[.x]-bullseye no longer build (see DB_BASE_IMAGE above).
+    # Build from a patched copy; the bundle's own Dockerfile is left untouched.
+    OLD_BASE_RE='^([Ff][Rr][Oo][Mm][[:space:]]+)((docker\.io/)?(library/)?postgres:15(\.[0-9]+)*(-bullseye)?)([[:space:]]|$)'
+    if [ -n "$DB_BASE_IMAGE" ] && grep -Eq "$OLD_BASE_RE" "$DB_DOCKERFILE"; then
+        OLD_BASE=$(grep -E "$OLD_BASE_RE" "$DB_DOCKERFILE" | head -1 | awk '{print $2}')
+        PATCHED_DOCKERFILE="${DB_DOCKERFILE}.patched"
+        sed -E "s#${OLD_BASE_RE}#\1${DB_BASE_IMAGE}\7#" "$DB_DOCKERFILE" > "$PATCHED_DOCKERFILE"
+        warn "DB image base ${OLD_BASE} no longer builds (retired apt repo); using ${DB_BASE_IMAGE} (same PostgreSQL 15)"
+        log "Patched copy: ${PATCHED_DOCKERFILE} (original unchanged)"
+        DB_DOCKERFILE="$PATCHED_DOCKERFILE"
+    fi
+
+    if ! grep -qF "$PGDG_MAJOR_MARK" "$DB_DOCKERFILE"; then
+        PGDG_DOCKERFILE="${DB_DOCKERFILE%.patched}.patched"
+        if pgdg_major_patch "$DB_DOCKERFILE" "${PGDG_DOCKERFILE}.tmp"; then
+            mv -f "${PGDG_DOCKERFILE}.tmp" "$PGDG_DOCKERFILE"
+            warn "PostgreSQL repos in the DB image use the RHEL major version (PGDG has no folder yet for the newest RHEL minor)."
+            log "Patched copy: ${PGDG_DOCKERFILE} (original unchanged)"
+            DB_DOCKERFILE="$PGDG_DOCKERFILE"
+        else
+            rm -f "${PGDG_DOCKERFILE}.tmp"
         fi
-    done
-else
-    for df in \
-        "docker/Dockerfile.hardened-takserver-db" \
-        "docker/Dockerfile.takserver-db"; do
-        if [ -f "$df" ]; then
-            DB_DOCKERFILE="$df"
-            break
-        fi
-    done
-fi
+    fi
+}
+# END db_dockerfile
 
-if [ -z "$DB_DOCKERFILE" ]; then
-    err "No database Dockerfile found in docker/"
-    ls docker/
-    exit 1
-fi
-
-log "Using Dockerfile: ${DB_DOCKERFILE}"
+select_db_dockerfile || exit 1
 
 # Hardened 5.8 bundles read ARG TARGETARCH, which the legacy builder leaves empty.
 if [ "$HAVE_BUILDX" -eq 0 ] && grep -Eq '^[[:space:]]*ARG[[:space:]]+TARGETARCH' "$DB_DOCKERFILE"; then
@@ -378,19 +652,11 @@ if [ "$HAVE_BUILDX" -eq 0 ] && grep -Eq '^[[:space:]]*ARG[[:space:]]+TARGETARCH'
     exit 1
 fi
 
-# postgres:15 / 15.x / 15[.x]-bullseye no longer build (see DB_BASE_IMAGE above).
-# Build from a patched copy; the bundle's own Dockerfile is left untouched.
-OLD_BASE_RE='^([Ff][Rr][Oo][Mm][[:space:]]+)((docker\.io/)?(library/)?postgres:15(\.[0-9]+)*(-bullseye)?)([[:space:]]|$)'
-if [ -n "$DB_BASE_IMAGE" ] && grep -Eq "$OLD_BASE_RE" "$DB_DOCKERFILE"; then
-    OLD_BASE=$(grep -E "$OLD_BASE_RE" "$DB_DOCKERFILE" | head -1 | awk '{print $2}')
-    PATCHED_DOCKERFILE="${DB_DOCKERFILE}.patched"
-    sed -E "s#${OLD_BASE_RE}#\1${DB_BASE_IMAGE}\7#" "$DB_DOCKERFILE" > "$PATCHED_DOCKERFILE"
-    warn "DB image base ${OLD_BASE} no longer builds (retired apt repo); using ${DB_BASE_IMAGE} (same PostgreSQL 15)"
-    log "Patched copy: ${PATCHED_DOCKERFILE} (original unchanged)"
-    DB_DOCKERFILE="$PATCHED_DOCKERFILE"
-fi
+patch_db_dockerfile
 
-$DOCKER build -t takserver-db:"${VERSION}" -f "$DB_DOCKERFILE" .
+# --pull --no-cache: build on the newest base image and the newest PostgreSQL packages, never on layers a rebuild kept from an
+# earlier install (a PostgreSQL minor release reached new installs only this way, ops #756).
+$DOCKER build --pull --no-cache -t takserver-db:"${VERSION}" -f "$DB_DOCKERFILE" .
 
 log "Database image built"
 
@@ -429,12 +695,14 @@ if [ "$PERSIST_DB" = true ]; then
     # Hand the folder to whatever user the image runs as; 5.6/5.7 images run as root and are left alone.
     DB_RUN_UID=$($DOCKER run --rm --entrypoint id takserver-db:"${VERSION}" -u 2>/dev/null | tr -d '[:space:]' || true)
     if [[ "$DB_RUN_UID" =~ ^[0-9]+$ ]] && [ "$DB_RUN_UID" != "0" ]; then
-        chown "${DB_RUN_UID}:0" "$DB_DATA_DIR"
-        chmod 700 "$DB_DATA_DIR"
+        as_root chown "${DB_RUN_UID}:0" "$DB_DATA_DIR"
+        as_root chmod 700 "$DB_DATA_DIR"
         log "Database folder owned by uid ${DB_RUN_UID} (the user the database image runs as)"
         # That image also runs initdb while it is built, and an empty bind-mounted folder hides the result
         # ("pg_ctl: directory ... is not a database cluster directory"). Copy the image's cluster in on first use.
-        if [ -z "$(ls -A "$DB_DATA_DIR" 2>/dev/null)" ]; then
+        # The folder is now mode 700 for another uid, so a normal user cannot list it: look as root, or an existing
+        # database would read as empty and be overwritten.
+        if [ -z "$(as_root ls -A "$DB_DATA_DIR" 2>/dev/null)" ]; then
             $DOCKER run --rm --entrypoint sh -v "${DB_DATA_DIR}":/seed:z takserver-db:"${VERSION}" \
                 -c 'cp -a /var/lib/postgresql/data/. /seed/' \
                 || { err "Could not initialise the database folder ${DB_DATA_DIR}"; exit 1; }
@@ -608,6 +876,41 @@ fi
 
 log "Both containers running"
 
+# BEGIN prune_health_list
+# The 5.8 hardened health checks also checksum a list of files (tak/health/<name>/critical_file_list.txt) and fail
+# when one is missing. That list names /usr/share/crypto-policies/back-ends/*/openssl.config, which the current
+# UBI 10 crypto-policies package no longer ships, so both containers stay "unhealthy" although they work.
+# Drop entries that do not exist inside the container; the rest are still checked. Older bundles have no list.
+# Arguments: CONTAINER NAME [TAK_FOLDER, default tak]. When this user cannot write the list (an install made by root),
+# the changes go through as_root. The same function is in docker/tak-docker-enable-enrollment.sh, for installs made
+# before v1.0.2 (the CI check test_docker_non_root.sh fails if the two copies differ). (From tranzmatt, PR #30.)
+prune_health_list() {
+    local container="$1" list="${3:-tak}/health/$2/critical_file_list.txt" kept removed=0 line root=""
+    [ -f "$list" ] || return 0
+    kept=$(mktemp)
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            ''|'#'*) echo "$line" >> "$kept"; continue ;;
+        esac
+        if $DOCKER exec "$container" test -e "$line" 2>/dev/null; then
+            echo "$line" >> "$kept"
+        else
+            removed=$((removed + 1))
+        fi
+    done < "$list"
+    if [ "$removed" -gt 0 ]; then
+        { [ -w "$list" ] && [ -w "$(dirname "$list")" ]; } || root="as_root"
+        $root cp "$list" "${list}.orig"
+        $root tee "$list" < "$kept" > /dev/null
+        $root rm -f "$(dirname "$list")/critical_file_checksums.txt"
+        warn "Health check: removed ${removed} file(s) missing from ${container} from $list (original kept as ${list}.orig)"
+    fi
+    rm -f "$kept"
+}
+# END prune_health_list
+prune_health_list "$DB_CONTAINER" takserver-db
+prune_health_list "$TAK_CONTAINER" takserver
+
 #----------------------------------------------------------------------
 # 11. Generate Certificates
 #----------------------------------------------------------------------
@@ -617,17 +920,32 @@ log "Generating Root CA: ${CA_NAME}"
 $DOCKER exec -it "$TAK_CONTAINER" bash -c \
     "cd /opt/tak/certs && ./makeRootCa.sh --ca-name ${CA_NAME}"
 
-log "Generating server certificate: takserver"
+# An intermediate CA, like the Ubuntu installer makes. TAK Server signs the certificates it hands out on 8446 with its keystore
+# (${INTERMEDIATE_CA_NAME}-signing.jks). MOVE_CA=true and the "y" answer make later certificates (server, admin) signed by it too.
+log "Generating intermediate (signing) CA: ${INTERMEDIATE_CA_NAME}"
 $DOCKER exec -it "$TAK_CONTAINER" bash -c \
-    "cd /opt/tak/certs && ./makeCert.sh server takserver"
+    "cd /opt/tak/certs && echo y | MOVE_CA=true ./makeCert.sh ca ${INTERMEDIATE_CA_NAME}"
+[ -s "tak/certs/files/${INTERMEDIATE_CA_NAME}-signing.jks" ] || { err "No signing keystore was made for ${INTERMEDIATE_CA_NAME}"; exit 1; }
+
+# The server certificate names takserver plus the address and names from step 2b (ops #789): ATAK refuses a certificate that does not
+# name the address its user typed.
+log "Generating server certificate: ${CERT_NAMES_SHOWN}"
+make_server_cert "$TAK_CONTAINER" "$CERT_NAMES" || exit 1
 
 log "Generating admin certificate: ${ADMIN_CERT}"
 $DOCKER exec -it "$TAK_CONTAINER" bash -c \
     "cd /opt/tak/certs && ./makeCert.sh client ${ADMIN_CERT}"
 
+log "Enabling certificate enrollment on 8446"
+enable_enrollment tak/CoreConfig.xml "$INTERMEDIATE_CA_NAME" "$ORGANIZATION" "$ORGANIZATIONAL_UNIT" || exit 1
+
+# Restart the whole container, not `configureInDocker.sh` inside it (ops #703). That script stops the running TAK processes with
+# `ps | grep | kill`, and the 5.8 hardened image has no `ps`, so it killed nothing and started a second full set of Java processes
+# beside the first. The first set (started before any certificate existed) kept the old CoreConfig.xml and the old truststore, so
+# 8446 answered HTTP 500 on some runs and 8089 refused the certificates TAK signs on others. The container's own start command
+# (configureInDocker.sh init) starts one clean set that reads the new files.
 log "Restarting TAK Server to load certificates..."
-$DOCKER exec -d "$TAK_CONTAINER" bash -c \
-    "cd /opt/tak/ && ./configureInDocker.sh"
+$DOCKER restart "$TAK_CONTAINER" > /dev/null
 
 log "Waiting 45s for TAK Server to restart with certs..."
 sleep 45
@@ -648,10 +966,17 @@ log "Admin certificate authorized"
 #----------------------------------------------------------------------
 step "13: Fix File Permissions"
 
+# Hand the cert files to the host user so they can be copied off the box, but keep group 0: the 5.8 hardened
+# container runs as tak (uid 1001) in group 0 and must still write here to make more certs (makeCert.sh).
+# Group write goes on the folder only. The private keys get group read (mode 640), because makeCert.sh in that container
+# must read the CA key to sign a certificate (with the owner-only mode it fails with "Permission denied" and still exits 0).
+# Group 0 on the host is root only, so no other host user can read the keys. (ops #753)
+CERT_UID=$(id -u)
+[ "$CERT_UID" -eq 0 ] && CERT_UID=1000
 $DOCKER exec -u root "$TAK_CONTAINER" bash -c \
-    "chown -R 1000:1000 /opt/tak/certs/files/"
+    "chown -R ${CERT_UID}:0 /opt/tak/certs/files/ && chmod g+rwx /opt/tak/certs/files/ && find /opt/tak/certs/files -maxdepth 1 -name '*.key' -exec chmod g+r {} +"
 
-log "File permissions fixed (1000:1000)"
+log "File permissions fixed (${CERT_UID}:0)"
 
 #----------------------------------------------------------------------
 # 14. Verify
@@ -709,13 +1034,22 @@ echo "    2. Import into browser (password: ${CERT_PASS})"
 echo "    3. Browse to https://${SERVER_IP}:8443"
 echo "    4. Select the ${ADMIN_CERT} certificate when prompted"
 echo ""
+echo "  To sign in from ATAK with a username and password (port 8446):"
+echo "    1. Add a user in the web UI, or with UserManager."
+echo "    2. Give ATAK this CA file (password: ${CERT_PASS}), or it says: self-signed certificate in certificate chain:"
+echo "         $(pwd)/tak/certs/files/truststore-${INTERMEDIATE_CA_NAME}.p12"
+echo "       The easiest way for many phones is a data package. DEPLOYMENT-GUIDE.md, 'Signing in from ATAK', has the steps."
+echo "    3. In ATAK, type one of these as the server address: ${CERT_NAMES_SHOWN}"
+echo "       Any other address ends in: The TAK Server's identity could not be verified."
+echo "       To add one later, run docker/tak-docker-enable-enrollment.sh --server-name NAME."
+echo ""
 echo "  Docker commands (run from $(pwd)):"
 echo "    Logs:    docker logs -f ${TAK_CONTAINER}"
 echo "    DB Logs: docker logs -f ${DB_CONTAINER}"
 echo "    Stop:    docker stop ${TAK_CONTAINER} ${DB_CONTAINER}"
 echo "    Start:   docker start ${DB_CONTAINER} ${TAK_CONTAINER}"
 echo "    Shell:   docker exec -it ${TAK_CONTAINER} bash"
-echo "    Restart: docker exec -d ${TAK_CONTAINER} bash -c 'cd /opt/tak && ./configureInDocker.sh'"
+echo "    Restart: docker restart ${TAK_CONTAINER}"
 echo ""
 echo "  Optional Compose (from repo clone, after images are built):"
 echo "    export VERSION=\"${VERSION}\""

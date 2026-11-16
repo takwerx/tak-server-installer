@@ -46,6 +46,11 @@ chmod +x Ubuntu_22.04_Caddy_setup.sh
 chmod +x Ubuntu_22.04_TAK_Server_Hardening.sh
 ```
 
+> **Updating the scripts later:** run `git pull` in `~/tak-server-installer`. If git stops with "Your local changes to the following files would be overwritten by merge" for one of these three scripts, the only change is the `chmod +x` above (the scripts are now stored as executable, so newer copies do not have this problem). Run this once instead, which ignores the permission change and keeps any real edit you made:
+> ```bash
+> git -c core.fileMode=false pull
+> ```
+
 ---
 
 ## 2. Install TAK Server

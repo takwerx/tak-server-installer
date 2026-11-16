@@ -60,10 +60,110 @@ jobs:
       - run: pip install pyyaml
       - run: bash .github/ci/test_docker_ports.sh
 
+  # The Docker install sets up certificate enrollment on 8446: an intermediate signing CA and a certificateSigning block (ops #703).
+  docker-enrollment:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: bash .github/ci/test_docker_enrollment.sh
+
+  # The Docker install puts the addresses ATAK users type into the server certificate, so ATAK accepts it on 8446 (ops #789).
+  docker-server-names:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: bash .github/ci/test_docker_server_names.sh
+
+  # The Docker install puts real Docker on Rocky / RHEL, not the podman-docker stand-in that has no docker.service (ops #727).
+  docker-engine:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: bash .github/ci/test_docker_engine.sh
+
+  # The script that turns on ATAK sign-in (8446) on Docker installs made before v1.0.2, run against a fake docker (ops #729).
+  docker-enable-enrollment:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: bash .github/ci/test_docker_enable_enrollment.sh
+
+  # The 5.8 hardened DB image build uses PGDG's rhel-<major> repos, so a new RHEL minor cannot break it (ops #702).
+  db-pgdg-repo:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: bash .github/ci/test_db_pgdg_repo.sh
+
+  # The Ubuntu install retries the PostgreSQL signing key download and stops with a clear message if it never works (ops #728).
+  pgdg-key:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: bash .github/ci/test_pgdg_key.sh
+
+  # The Ubuntu Caddy script retries the signing key and repo list downloads and stops with a clear message if they never work (ops #730).
+  caddy-key:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: bash .github/ci/test_caddy_key.sh
+
+  # The scripts are stored as executable, so a user's Quick Start `chmod +x` is not a local change that blocks `git pull` (ops #731).
+  script-modes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: bash .github/ci/test_script_modes.sh
+
+  # The Docker install works for a normal user (sudo for ownership), keeps group 0 on the certs, prunes the health list and picks the ZIP's own bundle (ops #752).
+  docker-non-root:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: bash .github/ci/test_docker_non_root.sh
+
+  # The script that gives an existing Docker install the newest PostgreSQL build: backup first, a way back, and it stops when the data is not in a mounted folder (ops #756).
+  docker-update-db:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: bash .github/ci/test_docker_update_db.sh
+
   # One stable name to require in branch protection. A failed or cancelled job fails it.
   checks-ok:
     if: always()
-    needs: [static, release-hygiene, docker-ports]
+    needs: [static, release-hygiene, docker-ports, docker-enrollment, docker-engine, docker-enable-enrollment, docker-server-names, db-pgdg-repo, pgdg-key, caddy-key, script-modes, docker-non-root, docker-update-db]
     runs-on: ubuntu-24.04
     steps:
       - env:

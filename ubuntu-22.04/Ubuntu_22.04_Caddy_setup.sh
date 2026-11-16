@@ -56,9 +56,55 @@ echo "=========================================="
 # Install required packages
 apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
 
-# Add Caddy repository
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
+# Add Caddy repository. A dropped download used to leave an empty key file (the pipe into gpg hid the
+# curl error), and apt then failed with a confusing signature error (ops #730, same bug as ops #728).
+# Retry, check what arrived, and stop if it never does.
+# >>> caddy-repo
+CADDY_KEY_URL="https://dl.cloudsmith.io/public/caddy/stable/gpg.key"
+CADDY_LIST_URL="https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt"
+CADDY_KEY_FILE="${CADDY_KEY_FILE:-/usr/share/keyrings/caddy-stable-archive-keyring.gpg}"
+CADDY_LIST_FILE="${CADDY_LIST_FILE:-/etc/apt/sources.list.d/caddy-stable.list}"
+
+# caddy_fetch KIND URL DEST: download to a temp file, check KIND of content arrived, then install it as DEST.
+# KIND is "key" (armored PGP key, saved as a binary keyring) or "list" (apt source lines).
+caddy_fetch() {
+    local kind="$1" url="$2" dest="$3" tries=5 n=1 tmp tmp2
+    tmp=$(mktemp) || return 1
+    tmp2=$(mktemp) || { rm -f "$tmp"; return 1; }
+    while [ "$n" -le "$tries" ]; do
+        # -f: an HTTP error is a failure. The file must also hold the real thing, not an empty or error page.
+        if curl -fsSL --connect-timeout 15 --max-time 60 -o "$tmp" "$url"; then
+            if [ "$kind" = "key" ]; then
+                if grep -q -- "-----BEGIN PGP PUBLIC KEY BLOCK-----" "$tmp" \
+                    && gpg --dearmor < "$tmp" > "$tmp2" && [ -s "$tmp2" ] \
+                    && install -m 0644 "$tmp2" "$dest"; then
+                    rm -f "$tmp" "$tmp2"; return 0
+                fi
+            elif grep -q '^deb ' "$tmp" && install -m 0644 "$tmp" "$dest"; then
+                rm -f "$tmp" "$tmp2"; return 0
+            fi
+        fi
+        echo "  Caddy $kind download failed (attempt $n of $tries)"
+        [ "$n" -lt "$tries" ] && sleep $((n * 3))
+        n=$((n + 1))
+    done
+    rm -f "$tmp" "$tmp2"
+    return 1
+}
+# <<< caddy-repo
+
+if ! caddy_fetch key "$CADDY_KEY_URL" "$CADDY_KEY_FILE"; then
+    echo ""
+    echo "ERROR: Could not download the Caddy signing key from $CADDY_KEY_URL"
+    echo "Check this server's internet connection (DNS, firewall, proxy), then run this script again."
+    exit 1
+fi
+if ! caddy_fetch list "$CADDY_LIST_URL" "$CADDY_LIST_FILE"; then
+    echo ""
+    echo "ERROR: Could not download the Caddy repository list from $CADDY_LIST_URL"
+    echo "Check this server's internet connection (DNS, firewall, proxy), then run this script again."
+    exit 1
+fi
 
 # Update and install Caddy
 apt update
