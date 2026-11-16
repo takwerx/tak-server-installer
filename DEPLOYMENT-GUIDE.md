@@ -349,6 +349,18 @@ Edit variables at the top of `docker/tak-docker-install.sh` (CA name, org fields
 
 The script asks one question about ATAK: **the address or name your ATAK users will type to reach the server**. Press Enter to use this machine's own address. If your users connect by the public address or a host name, type it here (several: separate them with commas). It goes into the server certificate. To skip the question, set `TAK_SERVER_NAMES` first, for example `TAK_SERVER_NAMES=203.0.113.10,tak.example.org ./docker/tak-docker-install.sh`. IPv4 addresses and plain host names work (no `*` names, no IPv6).
 
+#### Running it with nobody at the keyboard (cloud-init, Ansible, CI)
+
+The script can run without a terminal. Two questions need an answer up front, and the rest has a default:
+
+- `TAK_INTERFACE`: the network interface to use, by name (`eth0`) or by its IPv4 address. Without it, the script uses the first interface in the list and says so.
+- `TAK_DOCKER_ZIP`: the ZIP file name, only needed when more than one `takserver-docker-*.zip` is in `~/tak-docker`. Without it and with more than one ZIP, the script stops and tells you to set it (it never guesses which TAK Server version to install).
+- `TAK_SERVER_NAMES`: the address or name your ATAK users type (see above). Without it, the script uses the interface's address.
+
+```
+TAK_INTERFACE=eth0 TAK_SERVER_NAMES=tak.example.org ./docker/tak-docker-install.sh < /dev/null
+```
+
 ### Signing in from ATAK with a username and password (port 8446)
 
 Two things must be true on each phone, or ATAK refuses the sign-in:
