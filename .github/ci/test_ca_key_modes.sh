@@ -202,7 +202,7 @@ if [ "$rc" -ne 0 ] && grep -q '^err: .*cannot read a CA signing keystore' "$work
 
 #=== 4. Docker: the scripts use it
 chown_line=$(line_of "$DINSTALL" 'chown -R \$\{CERT_UID\}:0 /opt/tak/certs/files/')
-lock_line=$(line_of "$DINSTALL" '^lock_ca_keys "\$TAK_CONTAINER"')
+lock_line=$(line_of "$DINSTALL" '^(if[[:space:]]+)?lock_ca_keys "\$TAK_CONTAINER"')
 if [ "$chown_line" -gt 0 ] && [ "$lock_line" -gt "$chown_line" ]; then ok "Docker install: lock_ca_keys runs after the last ownership change of certs/files (line $lock_line after line $chown_line)"; \
 else fail "Docker install: lock_ca_keys is not called after the last ownership change (chown line $chown_line, lock line $lock_line)"; fi
 if [ "$(block "$DINSTALL")" = "$(block "$DENABLE")" ]; then ok "$DENABLE: carries the same lock_ca_keys as the installer"; else fail "lock_ca_keys differs between $DINSTALL and $DENABLE (change both, they must stay the same)"; fi

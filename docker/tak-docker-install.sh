@@ -1014,7 +1014,11 @@ $DOCKER exec -u root "$TAK_CONTAINER" bash -c \
 log "File permissions fixed (${CERT_UID}:0)"
 
 # The CA signing keystores and the CA keys: owner and group 0 only (see lock_ca_keys above).
-lock_ca_keys "$TAK_CONTAINER" || warn "Check the CA keystores: docker exec -u root ${TAK_CONTAINER} ls -l /opt/tak/certs/files"
+if lock_ca_keys "$TAK_CONTAINER"; then
+    log "CA keystores and CA keys: readable by their owner and group 0 only"
+else
+    warn "Check the CA keystores: docker exec -u root ${TAK_CONTAINER} ls -l /opt/tak/certs/files"
+fi
 
 #----------------------------------------------------------------------
 # 14. Verify
