@@ -911,6 +911,39 @@ prune_health_list() {
 prune_health_list "$DB_CONTAINER" takserver-db
 prune_health_list "$TAK_CONTAINER" takserver
 
+# BEGIN lock_ca_keys
+# Certificate file permissions (ops #832). makeCert.sh writes the CA signing keystores (<CA>-signing.jks and <CA>-signing.p12) with
+# mode 644. Only TAK Server reads them, to sign the certificates it hands out on 8446. They and the CA private keys (<CA>.key,
+# ca-do-not-share.key, root-ca-do-not-share.key) get group 0 and mode 640: the owner and group 0 read them, nobody else. Group 0 is
+# what the 5.8 hardened container's user (tak, uid 1001) is in, and on the host it is root only. The files you copy off the box
+# (admin.p12, the truststores) are not changed. A link is never followed. Safe to run again. Argument: CONTAINER.
+# Afterwards the container's own user must still be able to open every signing keystore, or sign-in on 8446 would stop: returns 1 if not.
+# The same function is in docker/tak-docker-enable-enrollment.sh, for installs made before this (the CI check
+# .github/ci/test_ca_key_modes.sh runs it and fails if the two copies differ). Needs $DOCKER, log, warn and err.
+lock_ca_keys() {
+    local container="$1" changed
+    changed=$($DOCKER exec -u root "$container" bash -c '
+        cd /opt/tak/certs/files || exit 2
+        n=0
+        lock() {
+            { [ -f "$1" ] && [ ! -L "$1" ]; } || return 0
+            [ "$(stat -c %g:%a "$1")" = "0:640" ] && return 0
+            chgrp -h 0 "$1" && chmod 640 "$1" || exit 1
+            n=$((n + 1))
+        }
+        for f in *-signing.jks *-signing.p12; do
+            lock "$f"
+            lock "${f%-signing.*}.key"
+        done
+        lock ca-do-not-share.key
+        lock root-ca-do-not-share.key
+        echo "$n"') || { warn "Could not set group 0 and mode 640 on the CA keystores and CA keys in /opt/tak/certs/files in $container."; return 1; }
+    $DOCKER exec "$container" bash -c 'for f in /opt/tak/certs/files/*-signing.jks; do [ ! -e "$f" ] || [ -r "$f" ] || exit 1; done' \
+        || { err "TAK Server's own user cannot read a CA signing keystore in /opt/tak/certs/files in $container. Sign-in on 8446 needs it."; return 1; }
+    [ "${changed:-0}" = "0" ] || log "CA keystores and CA keys: group 0, mode 640 (${changed} file(s) changed). Only the owner and group 0 can read them."
+}
+# END lock_ca_keys
+
 #----------------------------------------------------------------------
 # 11. Generate Certificates
 #----------------------------------------------------------------------
@@ -926,6 +959,8 @@ log "Generating intermediate (signing) CA: ${INTERMEDIATE_CA_NAME}"
 $DOCKER exec -it "$TAK_CONTAINER" bash -c \
     "cd /opt/tak/certs && echo y | MOVE_CA=true ./makeCert.sh ca ${INTERMEDIATE_CA_NAME}"
 [ -s "tak/certs/files/${INTERMEDIATE_CA_NAME}-signing.jks" ] || { err "No signing keystore was made for ${INTERMEDIATE_CA_NAME}"; exit 1; }
+# the CA keystores exist from here on: close them now, and once more in step 13 when the folder has its final owner
+lock_ca_keys "$TAK_CONTAINER" > /dev/null || true
 
 # The server certificate names takserver plus the address and names from step 2b (ops #789): ATAK refuses a certificate that does not
 # name the address its user typed.
@@ -977,6 +1012,9 @@ $DOCKER exec -u root "$TAK_CONTAINER" bash -c \
     "chown -R ${CERT_UID}:0 /opt/tak/certs/files/ && chmod g+rwx /opt/tak/certs/files/ && find /opt/tak/certs/files -maxdepth 1 -name '*.key' -exec chmod g+r {} +"
 
 log "File permissions fixed (${CERT_UID}:0)"
+
+# The CA signing keystores and the CA keys: owner and group 0 only (see lock_ca_keys above).
+lock_ca_keys "$TAK_CONTAINER" || warn "Check the CA keystores: docker exec -u root ${TAK_CONTAINER} ls -l /opt/tak/certs/files"
 
 #----------------------------------------------------------------------
 # 14. Verify
