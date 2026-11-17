@@ -4,12 +4,36 @@ What changed for people running these scripts. Newest first.
 
 ## Unreleased
 
-### Added
-- Docker installs: `docker/tak-docker-stop.sh` stops TAK Server, shuts PostgreSQL down cleanly, then stops the database container. A plain `docker stop` kills PostgreSQL, so the next start runs crash recovery and logs "database system was not properly shut down". Use the script before you stop or reboot the machine.
-
 ### Fixed
 - Docker install of TAK Server 5.8: PostgreSQL now recycles its write-ahead log (WAL). TAK's database config copies each WAL file into a folder that does not exist, so every copy failed and PostgreSQL kept every file instead of staying near 1 GB, and the disk of a busy server filled up over time. New installs are fixed by the installer. For an install made before, run `./docker/tak-docker-fix-wal.sh` (no restart, about 1 minute; `--check` only looks). Nothing was ever archived, so nothing is lost.
+
+## v1.0.3 (Tue Nov 17, 2026)
+
+TAK Server's private keys are now readable only by TAK Server's own account, the Docker installer runs without a terminal, and a refused ATAK address says why.
+
+### Changed (read this before you update)
+- Key files are locked down. On an Ubuntu server a normal login can no longer read `admin.p12` directly, so copying it off with a normal login now fails. As root it works as before. With a normal login: `sudo cp /opt/tak/certs/files/admin.p12 ~/ && sudo chown $USER ~/admin.p12`, then copy it from your home folder.
+
+### Fixed
+- Ubuntu and Docker installs: the keystores (admin, user, server, the CA signing keystores) and the CA keys are no longer readable by every user on the machine. Ubuntu: owner `tak`, mode 600. Docker: group 0, mode 640. Truststores stay readable, because they go to phones.
+- Docker install runs with no terminal (cloud-init, Ansible, ssh with no tty). `TAK_INTERFACE` picks the network interface, `TAK_DOCKER_ZIP` picks the ZIP.
+- Docker install: a refused ATAK address now says why. Before, it asked again with no message.
 - `tak-docker-enable-enrollment.sh --verify-user`: if TAK Server answers HTTP 401 (wrong user name or password), enrollment now stays on and the script says to check the name and password. Before, it undid the change, although enrollment was fine.
+
+### Added
+- Docker install: you can pass the path of the TAK Server Docker ZIP (`./docker/tak-docker-install.sh /path/to/takserver-docker-<version>.zip`). The ZIP can be anywhere. With no path, it works as before. A missing file, or a file that is not a `takserver-docker-*.zip`, stops the script before any step. Thanks @tranzmatt.
+- Docker install: warns when the machine has under 8 GB of RAM. It only warns and keeps going. Thanks @tranzmatt.
+- Guide: Raspberry Pi 5 / ARM64 notes, contributed by @tranzmatt from his own Pi 5. We have not tested them.
+- Docker installs: `docker/tak-docker-stop.sh` stops TAK Server, shuts PostgreSQL down cleanly, then stops the database container. A plain `docker stop` kills PostgreSQL, so the next start runs crash recovery and logs "database system was not properly shut down". Use the script before you stop or reboot the machine.
+
+### Installed with v1.0.2 or older?
+Get the new scripts (`git pull`), then lock the key files once. Neither way restarts TAK Server.
+
+- Ubuntu: run `Ubuntu_22.04_TAK_Server_Hardening.sh` from the new copy, or the one-line command in DEPLOYMENT-GUIDE.md, "Certificate file permissions".
+- Docker: `sudo ./docker/tak-docker-enable-enrollment.sh` (safe to run again).
+
+### Known limit
+- Docker containers do not start by themselves after a reboot (same as before). Start them with `docker start takserver-db-<VERSION> takserver-<VERSION>`.
 
 ## v1.0.2 (Mon Nov 16, 2026)
 

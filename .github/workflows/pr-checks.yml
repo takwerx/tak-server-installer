@@ -190,6 +190,26 @@ jobs:
           persist-credentials: false
       - run: bash .github/ci/test_docker_stop.sh
 
+  # The Docker install warns, and keeps going, on a machine with under 8 GB of RAM (ops #752).
+  docker-ram-warning:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: bash .github/ci/test_docker_ram_warning.sh
+
+  # The Docker install takes the TAK ZIP's path as an argument and refuses a wrong file (ops #752).
+  docker-zip-path:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: bash .github/ci/test_docker_zip_path.sh
+
   # PostgreSQL in a Docker install recycles its write-ahead log: TAK's config archives into a folder that does not exist, and the installer and the fix script switch that off (ops #862).
   docker-wal:
     runs-on: ubuntu-24.04
@@ -203,7 +223,7 @@ jobs:
   # One stable name to require in branch protection. A failed or cancelled job fails it.
   checks-ok:
     if: always()
-    needs: [static, release-hygiene, docker-ports, docker-enrollment, docker-engine, docker-enable-enrollment, docker-server-names, db-pgdg-repo, pgdg-key, caddy-key, script-modes, docker-non-root, docker-update-db, ca-key-modes, docker-stop, docker-wal]
+    needs: [static, release-hygiene, docker-ports, docker-enrollment, docker-engine, docker-enable-enrollment, docker-server-names, db-pgdg-repo, pgdg-key, caddy-key, script-modes, docker-non-root, docker-update-db, ca-key-modes, docker-ram-warning, docker-zip-path, docker-stop, docker-wal]
     runs-on: ubuntu-24.04
     steps:
       - env:
