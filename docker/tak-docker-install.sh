@@ -133,6 +133,39 @@ make_server_cert() {
     done
 }
 # END server_names
+# BEGIN wal_archive
+# ops #862. TAK's database config (tak/db-utils/postgresql.conf in the 5.8 bundles) switches WAL archiving on and copies each finished
+# WAL segment to /var/lib/postgresql/archivedir. Nothing in the bundle or the image makes that folder, so every copy fails, and
+# PostgreSQL keeps every segment it could not archive: the disk fills up over time. Nothing was ever archived, so nothing is lost by
+# changing it. archive_command '/bin/true' is how the PostgreSQL manual says to switch archiving off without a restart: PostgreSQL then
+# counts each segment as archived and recycles it. Used by tak-docker-install.sh (before the database first starts) and by
+# docker/tak-docker-fix-wal.sh (for installs made before); the CI check .github/ci/test_docker_wal.sh fails if the two copies differ.
+WAL_NOOP_COMMAND='/bin/true'
+
+# 0 when the config file $1 archives into the missing folder and no other file of the bundle folder $2 makes that folder.
+wal_conf_broken() {
+    local conf="$1" bundle="$2" other
+    [ -f "$conf" ] || return 1
+    grep -Eq '^[[:space:]]*archive_mode[[:space:]]*=[[:space:]]*(on|always)([[:space:]#]|$)' "$conf" || return 1
+    grep -Eq '^[[:space:]]*archive_command[[:space:]]*=.*/var/lib/postgresql/archivedir' "$conf" || return 1
+    # A newer TAK image that makes the folder itself (a script or Dockerfile that names it) needs no change.
+    other=$(grep -rIl 'archivedir' "$bundle/docker" "$bundle/tak/db-utils" 2>/dev/null | grep -v '/postgresql\.conf$' || true)
+    [ -z "$other" ]
+}
+
+# Sets archive_command in the config file $1 to the no-op. Returns 1, and changes nothing, when there is nothing to fix.
+wal_conf_patch() {
+    local conf="$1" bundle="$2" tmp
+    wal_conf_broken "$conf" "$bundle" || return 1
+    tmp=$(mktemp) || return 1
+    sed -E "s|^([[:space:]]*archive_command[[:space:]]*=[[:space:]]*)'[^']*archivedir[^']*'|\1'${WAL_NOOP_COMMAND}'|" "$conf" > "$tmp"
+    if grep -q "archive_command[[:space:]]*=[[:space:]]*'${WAL_NOOP_COMMAND}'" "$tmp"; then
+        cat "$tmp" > "$conf" 2>/dev/null || as_root tee "$conf" < "$tmp" > /dev/null
+    fi
+    rm -f "$tmp"
+    grep -q "^[[:space:]]*archive_command[[:space:]]*=[[:space:]]*'${WAL_NOOP_COMMAND}'" "$conf"
+}
+# END wal_archive
 
 echo ""
 echo "============================================="
@@ -590,6 +623,15 @@ if [ -f "$CERT_META" ]; then
     log "  L=${CITY}, ST=${STATE}, C=${COUNTRY}"
 else
     warn "cert-metadata.sh not found at expected location"
+fi
+
+#----------------------------------------------------------------------
+# 5b. Database config: no failing WAL archive command (ops #862)
+#----------------------------------------------------------------------
+# TAK's postgresql.conf archives WAL into a folder that does not exist, so PostgreSQL never recycles its WAL (see the wal_archive block).
+# The file is copied into the database at its first start, so it is fixed here, before the database image is built and started.
+if wal_conf_patch "tak/db-utils/postgresql.conf" "."; then
+    log "Database config: WAL archiving no longer copies into a missing folder (archive_command is ${WAL_NOOP_COMMAND}), so PostgreSQL can recycle its WAL"
 fi
 
 #----------------------------------------------------------------------

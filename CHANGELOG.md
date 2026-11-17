@@ -8,6 +8,7 @@ What changed for people running these scripts. Newest first.
 - Docker installs: `docker/tak-docker-stop.sh` stops TAK Server, shuts PostgreSQL down cleanly, then stops the database container. A plain `docker stop` kills PostgreSQL, so the next start runs crash recovery and logs "database system was not properly shut down". Use the script before you stop or reboot the machine.
 
 ### Fixed
+- Docker install of TAK Server 5.8: PostgreSQL now recycles its write-ahead log (WAL). TAK's database config copies each WAL file into a folder that does not exist, so every copy failed and PostgreSQL kept every file, and the disk of a busy server filled up over time. New installs are fixed by the installer. For an install made before, run `./docker/tak-docker-fix-wal.sh` (no restart, about 1 minute; `--check` only looks). Nothing was ever archived, so nothing is lost.
 - `tak-docker-enable-enrollment.sh --verify-user`: if TAK Server answers HTTP 401 (wrong user name or password), enrollment now stays on and the script says to check the name and password. Before, it undid the change, although enrollment was fine.
 
 ## v1.0.2 (Mon Nov 16, 2026)
