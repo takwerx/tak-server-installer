@@ -537,6 +537,22 @@ It changes nothing, and says so, when:
 
 New installs need nothing: the installer now builds the database image with `--pull --no-cache`, so a re-install never reuses an old base image or old layers.
 
+### PostgreSQL write-ahead log (disk use) on a Docker install of TAK Server 5.8
+
+TAK's own database config (`tak/db-utils/postgresql.conf`) has `archive_mode = on` and an `archive_command` that copies each finished write-ahead log (WAL) file into `/var/lib/postgresql/archivedir`. That folder does not exist in the container, so every copy fails, and PostgreSQL keeps every WAL file it could not copy. They are never recycled, so the disk of a busy server fills up over time. A healthy PostgreSQL keeps its WAL folder near `max_wal_size` (1 GB here). On a test box, with the same writes each round, the folder stayed at 592 MB with the fix and grew 592, 1120, 1680, 2224 MB and more without it. `SELECT failed_count FROM pg_stat_archiver;` keeps rising. Installs made with the Ubuntu `.deb` are not affected.
+
+The installer (v1.0.3 and later) sets `archive_command = '/bin/true'` in that file before the database first starts. PostgreSQL then counts each WAL file as archived and recycles it. Nothing was ever archived, so nothing is lost, and no restart is needed to turn it on.
+
+For an install made before, get the new scripts (`git pull`), then run on the machine that runs TAK Server:
+
+```
+./docker/tak-docker-fix-wal.sh
+```
+
+It looks first. It changes something only when archiving is on, the command is TAK's default and the folder is missing. Then it sets `archive_command` on the running database and reloads the config (no restart, TAK Server keeps running), fixes the same line in the bundle's `tak/db-utils/postgresql.conf` (the database container copies that file in at each start), runs a checkpoint and prints the WAL files and size before and after (a backlog drops to about 1 GB at once; on the test box 2224 MB became 848 MB). `--check` only looks, `--container NAME` picks the TAK Server container when there is more than one.
+
+If you made the archive folder yourself, or set your own `archive_command`, the script leaves both alone.
+
 ### Database port (5432)
 
 TAK Server reaches PostgreSQL over the Docker network (`tak-database`), so the database port only needs to be reachable from the host itself. The script and Compose file publish it on **`127.0.0.1:5432`** only. Docker-published ports bypass `ufw`/`firewalld`, so don't rely on the host firewall to keep 5432 closed.
