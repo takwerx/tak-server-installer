@@ -169,5 +169,39 @@ if grep -qE 'makeCert\.sh server takserver' "$INSTALL"; then fail "install scrip
 if grep -q 'TAK_SERVER_NAMES' "$INSTALL" && grep -q 'CERT_NAMES="\${TAK_SERVER_NAMES},\${SERVER_IP}"' "$INSTALL"; then ok "install script: this box's address is always in the certificate, TAK_SERVER_NAMES adds to it"; else fail "install script: CERT_NAMES must hold TAK_SERVER_NAMES and SERVER_IP"; fi
 if grep -q 'truststore-\${INTERMEDIATE_CA_NAME}\.p12' "$INSTALL" && grep -q 'data package' "$INSTALL"; then ok "install script: the closing text says which CA file to load into ATAK"; else fail "install script: the closing text must name truststore-\${INTERMEDIATE_CA_NAME}.p12 and point at the data package steps in the guide"; fi
 
+# --- a refused address says why (ops #795). The checks above use a stand-in err() that prints to stderr. The real installer err() printed to
+# stdout, and the installer throws stdout away on the name checks (> /dev/null, $(...)), so the reason was lost. These run the installer's own
+# err() and its own "2b" step (the question and the TAK_SERVER_NAMES check), so they fail if err() goes back to stdout.
+real_err=$(grep -m1 '^err()' "$INSTALL")
+step_2b=$(sed -n '/^if \[ -z "\${TAK_SERVER_NAMES:-}" \]; then$/,/^log "The server certificate will name/p' "$INSTALL")
+if [ -n "$real_err" ] && [ -n "$step_2b" ]; then
+  {
+    echo 'set -e'
+    echo "RED=''; NC=''; GRN=''; YEL=''; CYN=''"
+    echo 'log() { echo "[+] $1"; }'
+    echo "$real_err"
+    block "$INSTALL"
+    echo 'SERVER_IP=192.0.2.7'
+    echo "$step_2b"
+  } > "$work/step2b.sh"
+  reason="is not an IPv4 address or a host name"
+
+  # a name set in TAK_SERVER_NAMES: the reason is printed, then the installer stops
+  out=$(TAK_SERVER_NAMES='bad*name' bash "$work/step2b.sh" 2>"$work/e.err" </dev/null); rc=$?
+  if [ "$rc" -ne 0 ]; then ok "install script: TAK_SERVER_NAMES=bad*name stops the install"; else fail "install script: TAK_SERVER_NAMES=bad*name did not stop the install"; fi
+  if grep -q "$reason" "$work/e.err"; then ok "install script: TAK_SERVER_NAMES=bad*name says why on stderr"; else fail "install script: TAK_SERVER_NAMES=bad*name gave no reason" "stderr: $(cat "$work/e.err")" "stdout: $out"; fi
+
+  # a name typed at the question: the reason is printed (stdin here is not a terminal, so the installer stops after the first refusal)
+  out=$(printf 'bad name!*\n' | bash "$work/step2b.sh" 2>"$work/e.err"); rc=$?
+  if [ "$rc" -ne 0 ]; then ok "install script: a refused typed address is not accepted"; else fail "install script: a refused typed address was accepted"; fi
+  if grep -q "$reason" "$work/e.err"; then ok "install script: a refused typed address says why on stderr"; else fail "install script: a refused typed address gave no reason" "stderr: $(cat "$work/e.err")" "stdout: $out"; fi
+
+  # a good name still goes through, with no error text
+  out=$(TAK_SERVER_NAMES='tak.example.org' bash "$work/step2b.sh" 2>"$work/e.err" </dev/null); rc=$?
+  if [ "$rc" -eq 0 ] && [ ! -s "$work/e.err" ] && printf '%s' "$out" | grep -q 'will name: takserver tak.example.org 192.0.2.7'; then ok "install script: a good name still goes into the certificate"; else fail "install script: a good name was not accepted cleanly" "exit $rc" "stderr: $(cat "$work/e.err")" "stdout: $out"; fi
+else
+  fail "install script: could not find err() or the 2b step (the question and the TAK_SERVER_NAMES check)"
+fi
+
 [ "$fails" -eq 0 ] && echo "all docker server name checks passed" || echo "$fails docker server name check(s) failed"
 [ "$fails" -eq 0 ]

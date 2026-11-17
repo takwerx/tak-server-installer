@@ -24,7 +24,7 @@ NC='\033[0m'
 
 log()  { echo -e "${GRN}[+]${NC} $1"; }
 warn() { echo -e "${YEL}[!]${NC} $1"; }
-err()  { echo -e "${RED}[ERROR]${NC} $1"; }
+err()  { echo -e "${RED}[ERROR]${NC} $1" >&2; }   # stderr, like the other Docker scripts: the name checks throw stdout away (ops #795)
 step() { echo -e "\n${CYN}=== STEP $1 ===${NC}"; }
 
 # BEGIN as_root

@@ -2,6 +2,40 @@
 
 What changed for people running these scripts. Newest first.
 
+## v1.0.2 (Mon Nov 16, 2026)
+
+ATAK users can sign in to a Docker install with a username and password on port 8446, and the Docker install works again with TAK Server 5.8, on Rocky/RHEL 9 and as a normal user.
+
+### Fixed
+- Docker install of TAK Server 5.8: the database image builds again. TAK's image moved to RHEL 10.3, which the PostgreSQL repo does not list yet; the installer now points it at the RHEL 10 folder.
+- Docker install sets up certificate enrollment, so ATAK sign-in on 8446 works (before: HTTP 500).
+- Docker install asks for the address or name your ATAK users type and puts it in the server certificate. Before, the certificate named only `takserver` and ATAK refused every real address. `TAK_SERVER_NAMES` skips the question.
+- Docker install works for a normal user: `sudo` is used for the ownership changes, `certs/files` keeps group 0 so the 5.8 container can make certificates, and the health check no longer lists a file the image does not have (containers show `(healthy)`). The bundle named inside the chosen ZIP is used. Thanks @tranzmatt.
+- Docker install on stock Rocky 9 / RHEL 9 installs Docker CE from Docker's repo instead of the `podman-docker` stand-in, which has no `docker.service`.
+- Docker install builds the database image with `--pull --no-cache`, so it always gets the newest PostgreSQL build.
+- Ubuntu install: the PostgreSQL and Caddy signing keys and the Caddy repo list are retried up to 5 times and checked. If they still fail, the script stops with a clear message instead of a later `NO_PUBKEY` error.
+- `git pull` no longer stops with "Your local changes would be overwritten" after you ran `chmod +x` on the Ubuntu scripts: they are now stored as executable.
+
+### Installed with v1.0.1 or older (Docker)?
+Running the installer again stops at the existing database container and changes nothing. Get the new scripts (`git pull`), then run, on the machine that runs TAK Server:
+
+```
+sudo ./docker/tak-docker-enable-enrollment.sh --server-name <address your ATAK users type>
+```
+
+It turns on ATAK sign-in on 8446, makes a server certificate with the names you give (same CA, so phones keep working), lets `makeCert.sh` inside the container make certificates, and fixes `(unhealthy)` containers. The old files are kept. Leave out `--server-name` to keep your server certificate as it is.
+
+To move the database to the newest PostgreSQL build (keeps your data, takes a backup first, puts the old one back if a check fails):
+
+```
+./docker/tak-docker-update-db.sh
+```
+
+Details for both are in DEPLOYMENT-GUIDE.md.
+
+### Known limit
+- The Docker installer needs someone at the keyboard (it asks questions). A version that can run unattended is planned for v1.0.3.
+
 ## v1.0.1 (Wed Nov 11, 2026)
 
 A Docker install of TAK Server no longer leaves extra TAK ports open to the internet. Only the three ports clients use stay open: 8089, 8443 and 8446.
