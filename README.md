@@ -30,6 +30,9 @@ sudo ./Ubuntu_22.04_TAK_Server_Hardening.sh
 ```
 
 **Docker (optional):** use the official Docker ZIP, then run `./docker/tak-docker-install.sh` (see [DEPLOYMENT-GUIDE.md](DEPLOYMENT-GUIDE.md#docker-tak-server-using-official-docker-zip-optional)).
+The Docker install asks which address or name your ATAK users will type, and puts it in the server certificate. To sign in from ATAK with a username and password, also load the installer's CA file into ATAK ([how](DEPLOYMENT-GUIDE.md#signing-in-from-atak-with-a-username-and-password-port-8446)).
+
+The Docker install also runs with nobody at the keyboard (cloud-init, Ansible, CI): set `TAK_INTERFACE` (and `TAK_DOCKER_ZIP` if several ZIPs are in the folder) first. See [the guide](DEPLOYMENT-GUIDE.md#running-it-with-nobody-at-the-keyboard-cloud-init-ansible-ci).
 
 **That's it!** Your TAK Server is running at `https://YOUR-IP:8443`
 

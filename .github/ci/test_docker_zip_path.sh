@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Checks that the Docker install takes the TAK ZIP's path as an argument (or in $TAK_ZIP) and refuses a wrong
+# Checks that the Docker install takes the TAK ZIP's path as an argument and refuses a wrong
 # file (ops #752, an idea from a contributor's PR, takwerx/tak-server-installer PR 30). The function is taken
 # out of the script itself. No Docker, no root:
 #   bash .github/ci/test_docker_zip_path.sh
@@ -23,27 +23,21 @@ mkdir -p "$work/elsewhere"
 : > "$work/elsewhere/takserver-docker-5.7-RELEASE-43.zip"
 : > "$work/elsewhere/notes.zip"
 
-# Run zip_arg in a fresh shell; prints "out=<stdout> err=<stderr> rc=<code>". Args: ARG [TAK_ZIP value] [folder to cd to first]
+# Run zip_arg in a fresh shell; prints "out=<stdout> err=<stderr> rc=<code>". Args: ARG [folder to cd to first]
 run_zip_arg() {
-  ( cd "${3:-$work}" || exit 9
-    out=$(unset TAK_ZIP; [ -n "${2:-}" ] && TAK_ZIP="$2"; . "$work/zip_arg.sh"; zip_arg "$1" 2>"$work/err"); rc=$?
+  ( cd "${2:-$work}" || exit 9
+    out=$(. "$work/zip_arg.sh"; zip_arg "$1" 2>"$work/err"); rc=$?
     echo "out=$out err=$(cat "$work/err") rc=$rc" )
 }
 
 r=$(run_zip_arg "")
-[ "$r" = "out= err= rc=0" ] && ok "no argument, no TAK_ZIP: prints nothing, no error (the folder scan runs as before)" || fail "no argument: $r"
+[ "$r" = "out= err= rc=0" ] && ok "no argument: prints nothing, no error (the folder scan runs as before)" || fail "no argument: $r"
 
 r=$(run_zip_arg "$work/elsewhere/takserver-docker-hardened-5.8-RELEASE-75.zip")
 [ "$r" = "out=$work/elsewhere/takserver-docker-hardened-5.8-RELEASE-75.zip err= rc=0" ] && ok "full path to a hardened ZIP is accepted" || fail "hardened ZIP by full path: $r"
 
 r=$(run_zip_arg "elsewhere/takserver-docker-5.7-RELEASE-43.zip")
 case "$r" in "out=$work/elsewhere/takserver-docker-5.7-RELEASE-43.zip err= rc=0"|"out=$(cd "$work" && pwd -P)/elsewhere/takserver-docker-5.7-RELEASE-43.zip err= rc=0") ok "relative path to a standard ZIP becomes a full path" ;; *) fail "relative path: $r" ;; esac
-
-r=$(run_zip_arg "" "$work/elsewhere/takserver-docker-5.7-RELEASE-43.zip")
-case "$r" in *"takserver-docker-5.7-RELEASE-43.zip err= rc=0") ok "TAK_ZIP is used when there is no argument" ;; *) fail "TAK_ZIP: $r" ;; esac
-
-r=$(run_zip_arg "$work/elsewhere/takserver-docker-5.7-RELEASE-43.zip" "$work/elsewhere/notes.zip")
-case "$r" in *"takserver-docker-5.7-RELEASE-43.zip err= rc=0") ok "the argument wins over TAK_ZIP" ;; *) fail "argument vs TAK_ZIP: $r" ;; esac
 
 r=$(run_zip_arg "$work/elsewhere/missing.zip")
 case "$r" in *"ZIP not found"*"rc=1") ok "a missing file stops with ZIP not found" ;; *) fail "missing file: $r" ;; esac
