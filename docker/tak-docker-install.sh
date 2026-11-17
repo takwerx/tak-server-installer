@@ -24,7 +24,7 @@ NC='\033[0m'
 
 log()  { echo -e "${GRN}[+]${NC} $1"; }
 warn() { echo -e "${YEL}[!]${NC} $1"; }
-err()  { echo -e "${RED}[ERROR]${NC} $1"; }
+err()  { echo -e "${RED}[ERROR]${NC} $1" >&2; }   # stderr, like the other Docker scripts: the name checks throw stdout away (ops #795)
 step() { echo -e "\n${CYN}=== STEP $1 ===${NC}"; }
 
 # BEGIN as_root
@@ -38,6 +38,101 @@ as_root() {
     fi
 }
 # END as_root
+
+# BEGIN unattended
+# Runs without a person at the keyboard (cloud-init, Ansible, CI; ops #794). Three things used to need a terminal: the interface question,
+# the ZIP question (only when several ZIPs are in the folder) and `docker exec -it`, which stops with "the input device is not a TTY".
+# TAK_INTERFACE and TAK_DOCKER_ZIP answer the two questions up front. With a terminal nothing changes.
+
+# Prints "-it" when the script has a terminal to give the container, and nothing when it has none.
+exec_tty_flags() {
+    if [ -t 0 ]; then echo "-it"; fi
+}
+
+# Prints the 0-based position of the wanted interface in the list. WANT is a name (eth0) or an IPv4 address. Each other argument is
+# "NAME ADDRESS". Prints nothing and returns 1 when none matches.
+iface_index() {
+    local want="$1" i=0 line
+    shift
+    for line in "$@"; do
+        case " $line " in *" $want "*) echo "$i"; return 0 ;; esac
+        i=$((i + 1))
+    done
+    return 1
+}
+
+# Prints the 0-based position of the wanted ZIP in the list. WANT is a file name or a full path. Each other argument is a full path.
+# Prints nothing and returns 1 when none matches.
+zip_index() {
+    local want="$1" i=0 z
+    shift
+    for z in "$@"; do
+        if [ "$z" = "$want" ] || [ "$(basename "$z")" = "$want" ]; then echo "$i"; return 0; fi
+        i=$((i + 1))
+    done
+    return 1
+}
+# END unattended
+
+# BEGIN server_names
+# The names in the TAK Server certificate (ops #789). ATAK checks the address a user types against the names in the server certificate on
+# 8446 and refuses the sign-in when it is not there ("The TAK Server's identity could not be verified"). makeCert.sh puts one name in:
+# the name it is given, which here is takserver, so only "takserver" worked. These two functions add the addresses and names the users type.
+# The same functions are in docker/tak-docker-enable-enrollment.sh, for installs made before (the CI check test_docker_server_names.sh
+# fails if the two copies differ). Both need $DOCKER and err.
+
+# Prints the extra name lines (IP.2, DNS.2, ...) for a list of IPv4 addresses and host names split by commas or spaces. takserver is the
+# first name already (DNS.1), so it and repeats are skipped. Prints nothing and returns 1 for anything else (an IPv6 address, a * name, a space).
+server_alt_lines() {
+    local list="${1//,/ }" item lower o ip=1 dns=1 seen=" takserver " out=""
+    for item in $list; do
+        lower=$(printf '%s' "$item" | tr 'A-Z' 'a-z')
+        case "$seen" in *" $lower "*) continue ;; esac
+        if [[ "$item" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]]; then
+            for o in 1 2 3 4; do
+                [ "$((10#${BASH_REMATCH[$o]}))" -le 255 ] || { err "'$item' is not an IP address (a part is over 255)."; return 1; }
+            done
+            ip=$((ip + 1)); out+="IP.${ip} = ${item}"$'\n'
+        elif [[ "$item" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$ ]]; then
+            dns=$((dns + 1)); out+="DNS.${dns} = ${item}"$'\n'
+        else
+            err "'$item' is not an IPv4 address or a host name (letters, digits, dots and dashes only)."; return 1
+        fi
+        seen+="$lower "
+    done
+    printf '%s' "$out"
+}
+
+# Makes the server certificate (takserver.pem, .key, .jks, .p12) in the TAK Server container with "takserver" and the given names in
+# its name list. Arguments: CONTAINER NAMES. It runs a copy of the bundle's makeCert.sh with the extra lines added to the name list
+# (the bundle's own file is not changed). Checks the result by reading the names back: makeCert.sh exits 0 even when it fails.
+make_server_cert() {
+    local container="$1" lines name shown
+    lines=$(server_alt_lines "${2:-}") || return 1
+    $DOCKER exec -u root -e ALT_LINES="$lines" -e MATCH='$ALTNAMEFIELD = $SNAME' "$container" bash -c '
+        cd /opt/tak/certs || exit 2
+        n=0
+        while IFS= read -r l || [ -n "$l" ]; do
+            printf "%s\n" "$l"
+            if [ "$l" = "$MATCH" ]; then n=$((n + 1)); [ -z "$ALT_LINES" ] || printf "%s\n" "$ALT_LINES"; fi
+        done < makeCert.sh > makeCert-names.sh
+        if [ "$n" -ne 1 ]; then echo "makeCert.sh has an unexpected name list (found the marker $n times)"; rm -f makeCert-names.sh; exit 3; fi
+        chmod 755 makeCert-names.sh
+        ./makeCert-names.sh server takserver
+        rc=$?
+        rm -f makeCert-names.sh
+        exit $rc' || { err "makeCert.sh could not make the server certificate."; return 1; }
+    $DOCKER exec -u root "$container" test -s /opt/tak/certs/files/takserver.jks \
+        || { err "makeCert.sh did not make takserver.jks."; return 1; }
+    shown=$($DOCKER exec -u root "$container" openssl x509 -noout -ext subjectAltName -in /opt/tak/certs/files/takserver.pem 2>/dev/null)
+    for name in $(printf '%s' "$lines" | sed 's/^[A-Z]*\.[0-9]* = //'); do
+        case "$shown" in
+            *"$name"*) ;;
+            *) err "The server certificate does not name $name. Its names: ${shown//$'\n'/ }"; return 1 ;;
+        esac
+    done
+}
+# END server_names
 
 echo ""
 echo "============================================="
@@ -184,6 +279,10 @@ else
     DOCKER="docker"
 fi
 
+# "-it" for the `docker exec` lines when a person is at a terminal, nothing when not (cloud-init, Ansible, CI), so they do not stop with
+# "the input device is not a TTY" (ops #794).
+EXEC_TTY=$(exec_tty_flags)
+
 # BuildKit (docker buildx). The 5.8 hardened Dockerfiles read ARG TARGETARCH,
 # which only BuildKit fills in; the legacy builder leaves it empty and the
 # database image build fails on a 404 for the PostgreSQL repo package.
@@ -278,9 +377,19 @@ else
         echo "  $((i+1))) $(basename "${ZIPS[$i]}")"
     done
     echo ""
-    read -r -p "Select ZIP to install [1]: " ZIP_SEL
-    ZIP_SEL=${ZIP_SEL:-1}
-    ZIP_SEL=$((ZIP_SEL - 1))
+    if [ -n "${TAK_DOCKER_ZIP:-}" ]; then
+        ZIP_SEL=$(zip_index "$TAK_DOCKER_ZIP" "${ZIPS[@]}") || { err "TAK_DOCKER_ZIP=${TAK_DOCKER_ZIP} is not one of the ZIPs listed above (use the file name)."; exit 1; }
+    else
+        ZIP_EOF=0
+        read -r -p "Select ZIP to install [1]: " ZIP_SEL || ZIP_EOF=1
+        if [ "$ZIP_EOF" = 1 ]; then
+            err "More than one ZIP is in ${INSTALL_DIR} and there is no terminal to choose one."
+            echo "  Set TAK_DOCKER_ZIP to the file name, for example: TAK_DOCKER_ZIP=$(basename "${ZIPS[0]}") ./docker/tak-docker-install.sh"
+            exit 1
+        fi
+        ZIP_SEL=${ZIP_SEL:-1}
+        ZIP_SEL=$((ZIP_SEL - 1))
+    fi
     TAK_ZIP="${ZIPS[$ZIP_SEL]}"
 fi
 
@@ -307,9 +416,18 @@ for i in "${!IFACES[@]}"; do
 done
 
 echo ""
-read -r -p "Select interface [1]: " NIC_SEL
-NIC_SEL=${NIC_SEL:-1}
-NIC_SEL=$((NIC_SEL - 1))
+if [ -n "${TAK_INTERFACE:-}" ]; then
+    NIC_SEL=$(iface_index "$TAK_INTERFACE" "${IFACES[@]}") || { err "TAK_INTERFACE=${TAK_INTERFACE} is not one of the interfaces listed above (use a name such as eth0, or its address)."; exit 1; }
+else
+    NIC_EOF=0
+    read -r -p "Select interface [1]: " NIC_SEL || NIC_EOF=1
+    if [ "$NIC_EOF" = 1 ]; then
+        echo ""
+        warn "No terminal to answer on and TAK_INTERFACE is not set: using interface 1. Set TAK_INTERFACE (a name such as eth0, or its address) to choose."
+    fi
+    NIC_SEL=${NIC_SEL:-1}
+    NIC_SEL=$((NIC_SEL - 1))
+fi
 
 SERVER_IP=$(echo "${IFACES[$NIC_SEL]}" | awk '{print $2}')
 NIC_NAME=$(echo "${IFACES[$NIC_SEL]}" | awk '{print $1}')
@@ -320,6 +438,30 @@ if [ -z "$SERVER_IP" ]; then
 fi
 
 log "Using: ${NIC_NAME} → ${SERVER_IP}"
+
+#----------------------------------------------------------------------
+# 2b. The address or name ATAK users will type (goes into the server certificate, ops #789)
+#----------------------------------------------------------------------
+# ATAK checks what a user types as the server address against the names in the server certificate, so an address that is not in it
+# ends in "The TAK Server's identity could not be verified". This box's own address is always in it. Add the public address or the
+# host name your users type (several: separate them with commas). Set TAK_SERVER_NAMES to skip the question.
+if [ -z "${TAK_SERVER_NAMES:-}" ]; then
+    echo ""
+    echo "ATAK checks the address your users type against the server certificate."
+    echo "Type the address or name they will use to reach this server (several: separate with commas)."
+    echo "Examples: 203.0.113.10   tak.example.org"
+    while :; do
+        read -r -p "Address or name for ATAK users [${SERVER_IP}]: " TAK_SERVER_NAMES || true
+        TAK_SERVER_NAMES=${TAK_SERVER_NAMES:-$SERVER_IP}
+        server_alt_lines "${TAK_SERVER_NAMES},${SERVER_IP}" > /dev/null && break
+        TAK_SERVER_NAMES=""
+        [ -t 0 ] || exit 1
+    done
+fi
+CERT_NAMES="${TAK_SERVER_NAMES},${SERVER_IP}"
+CERT_NAME_LINES=$(server_alt_lines "$CERT_NAMES") || { err "TAK_SERVER_NAMES is not usable (see above)."; exit 1; }
+CERT_NAMES_SHOWN="takserver $(printf '%s' "$CERT_NAME_LINES" | sed 's/^[A-Z]*\.[0-9]* = //' | tr '\n' ' ')"
+log "The server certificate will name: ${CERT_NAMES_SHOWN}"
 
 #----------------------------------------------------------------------
 # 3. Extract ZIP
@@ -827,28 +969,64 @@ prune_health_list() {
 prune_health_list "$DB_CONTAINER" takserver-db
 prune_health_list "$TAK_CONTAINER" takserver
 
+# BEGIN lock_ca_keys
+# Certificate file permissions (ops #832). makeCert.sh writes the CA signing keystores (<CA>-signing.jks and <CA>-signing.p12) with
+# mode 644. Only TAK Server reads them, to sign the certificates it hands out on 8446. They and the CA private keys (<CA>.key,
+# ca-do-not-share.key, root-ca-do-not-share.key) get group 0 and mode 640: the owner and group 0 read them, nobody else. Group 0 is
+# what the 5.8 hardened container's user (tak, uid 1001) is in, and on the host it is root only. The files you copy off the box
+# (admin.p12, the truststores) are not changed. A link is never followed. Safe to run again. Argument: CONTAINER.
+# Afterwards the container's own user must still be able to open every signing keystore, or sign-in on 8446 would stop: returns 1 if not.
+# The same function is in docker/tak-docker-enable-enrollment.sh, for installs made before this (the CI check
+# .github/ci/test_ca_key_modes.sh runs it and fails if the two copies differ). Needs $DOCKER, log, warn and err.
+lock_ca_keys() {
+    local container="$1" changed
+    changed=$($DOCKER exec -u root "$container" bash -c '
+        cd /opt/tak/certs/files || exit 2
+        n=0
+        lock() {
+            { [ -f "$1" ] && [ ! -L "$1" ]; } || return 0
+            [ "$(stat -c %g:%a "$1")" = "0:640" ] && return 0
+            chgrp -h 0 "$1" && chmod 640 "$1" || exit 1
+            n=$((n + 1))
+        }
+        for f in *-signing.jks *-signing.p12; do
+            lock "$f"
+            lock "${f%-signing.*}.key"
+        done
+        lock ca-do-not-share.key
+        lock root-ca-do-not-share.key
+        echo "$n"') || { warn "Could not set group 0 and mode 640 on the CA keystores and CA keys in /opt/tak/certs/files in $container."; return 1; }
+    $DOCKER exec "$container" bash -c 'for f in /opt/tak/certs/files/*-signing.jks; do [ ! -e "$f" ] || [ -r "$f" ] || exit 1; done' \
+        || { err "TAK Server's own user cannot read a CA signing keystore in /opt/tak/certs/files in $container. Sign-in on 8446 needs it."; return 1; }
+    [ "${changed:-0}" = "0" ] || log "CA keystores and CA keys: group 0, mode 640 (${changed} file(s) changed). Only the owner and group 0 can read them."
+}
+# END lock_ca_keys
+
 #----------------------------------------------------------------------
 # 11. Generate Certificates
 #----------------------------------------------------------------------
 step "11: Generate Certificates"
 
 log "Generating Root CA: ${CA_NAME}"
-$DOCKER exec -it "$TAK_CONTAINER" bash -c \
+$DOCKER exec $EXEC_TTY "$TAK_CONTAINER" bash -c \
     "cd /opt/tak/certs && ./makeRootCa.sh --ca-name ${CA_NAME}"
 
 # An intermediate CA, like the Ubuntu installer makes. TAK Server signs the certificates it hands out on 8446 with its keystore
 # (${INTERMEDIATE_CA_NAME}-signing.jks). MOVE_CA=true and the "y" answer make later certificates (server, admin) signed by it too.
 log "Generating intermediate (signing) CA: ${INTERMEDIATE_CA_NAME}"
-$DOCKER exec -it "$TAK_CONTAINER" bash -c \
+$DOCKER exec $EXEC_TTY "$TAK_CONTAINER" bash -c \
     "cd /opt/tak/certs && echo y | MOVE_CA=true ./makeCert.sh ca ${INTERMEDIATE_CA_NAME}"
 [ -s "tak/certs/files/${INTERMEDIATE_CA_NAME}-signing.jks" ] || { err "No signing keystore was made for ${INTERMEDIATE_CA_NAME}"; exit 1; }
+# the CA keystores exist from here on: close them now, and once more in step 13 when the folder has its final owner
+lock_ca_keys "$TAK_CONTAINER" > /dev/null || true
 
-log "Generating server certificate: takserver"
-$DOCKER exec -it "$TAK_CONTAINER" bash -c \
-    "cd /opt/tak/certs && ./makeCert.sh server takserver"
+# The server certificate names takserver plus the address and names from step 2b (ops #789): ATAK refuses a certificate that does not
+# name the address its user typed.
+log "Generating server certificate: ${CERT_NAMES_SHOWN}"
+make_server_cert "$TAK_CONTAINER" "$CERT_NAMES" || exit 1
 
 log "Generating admin certificate: ${ADMIN_CERT}"
-$DOCKER exec -it "$TAK_CONTAINER" bash -c \
+$DOCKER exec $EXEC_TTY "$TAK_CONTAINER" bash -c \
     "cd /opt/tak/certs && ./makeCert.sh client ${ADMIN_CERT}"
 
 log "Enabling certificate enrollment on 8446"
@@ -892,6 +1070,13 @@ $DOCKER exec -u root "$TAK_CONTAINER" bash -c \
     "chown -R ${CERT_UID}:0 /opt/tak/certs/files/ && chmod g+rwx /opt/tak/certs/files/ && find /opt/tak/certs/files -maxdepth 1 -name '*.key' -exec chmod g+r {} +"
 
 log "File permissions fixed (${CERT_UID}:0)"
+
+# The CA signing keystores and the CA keys: owner and group 0 only (see lock_ca_keys above).
+if lock_ca_keys "$TAK_CONTAINER"; then
+    log "CA keystores and CA keys: readable by their owner and group 0 only"
+else
+    warn "Check the CA keystores: docker exec -u root ${TAK_CONTAINER} ls -l /opt/tak/certs/files"
+fi
 
 #----------------------------------------------------------------------
 # 14. Verify
@@ -948,6 +1133,15 @@ echo "    1. Copy ${ADMIN_CERT}.p12 to your workstation"
 echo "    2. Import into browser (password: ${CERT_PASS})"
 echo "    3. Browse to https://${SERVER_IP}:8443"
 echo "    4. Select the ${ADMIN_CERT} certificate when prompted"
+echo ""
+echo "  To sign in from ATAK with a username and password (port 8446):"
+echo "    1. Add a user in the web UI, or with UserManager."
+echo "    2. Give ATAK this CA file (password: ${CERT_PASS}), or it says: self-signed certificate in certificate chain:"
+echo "         $(pwd)/tak/certs/files/truststore-${INTERMEDIATE_CA_NAME}.p12"
+echo "       The easiest way for many phones is a data package. DEPLOYMENT-GUIDE.md, 'Signing in from ATAK', has the steps."
+echo "    3. In ATAK, type one of these as the server address: ${CERT_NAMES_SHOWN}"
+echo "       Any other address ends in: The TAK Server's identity could not be verified."
+echo "       To add one later, run docker/tak-docker-enable-enrollment.sh --server-name NAME."
 echo ""
 echo "  Docker commands (run from $(pwd)):"
 echo "    Logs:    docker logs -f ${TAK_CONTAINER}"
