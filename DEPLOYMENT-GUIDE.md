@@ -446,10 +446,11 @@ Use `sudo`. If you installed with `sudo` (most people did), the `tak/` folder be
 
 It makes an intermediate signing CA under your root CA, adds the `certificateSigning` block to `tak/CoreConfig.xml` (the old file is kept beside it, with the date in its name) and restarts the TAK Server container, which takes about a minute. The database, users, existing certificates and ports are not changed, and `ca.pem` stays your root CA, so certificates you make later with `makeCert.sh` are signed as before. If TAK Server does not come back, the script puts the old `CoreConfig.xml` back and restarts it again.
 
-The same script also brings an old Docker install in line with v1.0.2 in two more ways. It does them whether or not enrollment is already on, and they need no restart:
+The same script also brings an old Docker install in line with the current installer in three more ways. It does them whether or not enrollment is already on, and they need no restart:
 
 - **Certificates made inside the container.** `tak/certs/files` gets group 0 and group write, and the private keys get group read (the folder keeps the same owner). Before, `docker exec <container> bash -c "cd /opt/tak/certs && ./makeCert.sh client NAME"` printed `Permission denied` and made no `.p12`, although it ended with exit code 0. Always check that `NAME.p12` is there. Group 0 on the host is root only, so other users on the machine still cannot read the keys.
 - **`(unhealthy)` in `docker ps`.** The 5.8 hardened health check also lists a system file that the image no longer has, so both containers stayed `(unhealthy)` while TAK Server worked. The script removes the missing entries from `tak/health/*/critical_file_list.txt` (the original is kept as `critical_file_list.txt.orig`). `docker ps` shows `(healthy)` within a minute or two.
+- **CA keystore permissions.** The CA signing keystores (`<CA name>-signing.jks` and `<CA name>-signing.p12`) and the CA private keys in `tak/certs/files` get group 0 and mode 640, as a new install has them: their owner and group 0 read them, nobody else. Group 0 is the group of the container's own user, and on the host it is root only. `admin.p12` and the truststores are not changed. To do only this by hand: `docker exec -u root takserver-<VERSION> sh -c 'cd /opt/tak/certs/files && chgrp 0 *-signing.jks *-signing.p12 && chmod 640 *-signing.jks *-signing.p12'`.
 
 **Installs made before this fix name only `takserver` in the server certificate.** ATAK then refuses an address or host name. The same script can make a new server certificate with the names you give it:
 
@@ -1279,6 +1280,20 @@ VPS Provider:
 - Use private networking
 - Configure snapshots/backups
 - Enable monitoring
+
+### Certificate file permissions (Ubuntu script installs)
+
+The install script sets the CA signing keystores (`<CA name>-signing.jks` and `<CA name>-signing.p12`) and the CA private keys in `/opt/tak/certs/files` to owner `tak` and mode 600. Only TAK Server reads these files. `admin.p12`, `user.p12`, the truststores and all other files are not changed.
+
+A server installed with an older copy of the script has the two keystores at a wider mode. To give them the same owner and mode, run this once on the server. TAK Server is not restarted and clients stay connected:
+
+```
+sudo sh -c 'cd /opt/tak/certs/files && chown tak:tak *-signing.jks *-signing.p12 && chmod 600 *-signing.jks *-signing.p12'
+```
+
+`Ubuntu_22.04_TAK_Server_Hardening.sh` from a current copy of the scripts does the same when it starts.
+
+Check: `sudo ls -l /opt/tak/certs/files/ | grep signing` shows `-rw------- 1 tak tak` for both files.
 
 ### Keeping PostgreSQL up to date (Ubuntu script installs)
 

@@ -15,11 +15,13 @@
 #   3. restarts the TAK Server container (about a minute) and checks that 8446 answers; if it does not, it puts the old
 #      CoreConfig.xml back and restarts again
 #
-# It also brings an old install in line with v1.0.2 in two more ways (they run even when enrollment is already on, and are safe to repeat):
+# It also brings an old install in line with the current installer in three more ways (they run even when enrollment is already on, and are safe to repeat):
 #   - certs/files gets group 0 and group write, so "./makeCert.sh client NAME" run as the container's own user works (it fails on installs
 #     made before v1.0.2). The owner stays; keys keep their owner-only mode.
 #   - the 5.8 hardened health check lists a file the image does not ship, so docker ps shows both containers "(unhealthy)" while TAK
 #     Server works. Entries missing from the image are dropped from tak/health/*/critical_file_list.txt (a copy is kept as .orig).
+#   - the CA signing keystores (<CA>-signing.jks and .p12) and the CA keys get group 0 and mode 640, so only their owner and group 0
+#     read them (older installs leave the keystores at mode 644). No restart.
 #
 # Run it on the machine that runs the containers, from a copy of this repo:   sudo ./docker/tak-docker-enable-enrollment.sh
 # (use sudo: an install made with sudo has a tak/ folder that belongs to root, and a normal user cannot change CoreConfig.xml there)
@@ -54,7 +56,7 @@ enable_enrollment() {
 }
 # END enable_enrollment
 
-# Copies (as_root, server_names and prune_health_list are copied from tak-docker-install.sh; the CI check .github/ci/test_docker_non_root.sh fails if the copies differ)
+# Copies (as_root, server_names, prune_health_list and lock_ca_keys are copied from tak-docker-install.sh; the CI checks test_docker_non_root.sh and test_ca_key_modes.sh fail if the copies differ)
 # BEGIN as_root
 # Run a command as root: directly when the script already runs as root, through sudo otherwise.
 # Needed for ownership changes (chown/chgrp to another user or group), which a normal user cannot make.
@@ -158,6 +160,39 @@ prune_health_list() {
 }
 # END prune_health_list
 
+# BEGIN lock_ca_keys
+# Certificate file permissions (ops #832). makeCert.sh writes the CA signing keystores (<CA>-signing.jks and <CA>-signing.p12) with
+# mode 644. Only TAK Server reads them, to sign the certificates it hands out on 8446. They and the CA private keys (<CA>.key,
+# ca-do-not-share.key, root-ca-do-not-share.key) get group 0 and mode 640: the owner and group 0 read them, nobody else. Group 0 is
+# what the 5.8 hardened container's user (tak, uid 1001) is in, and on the host it is root only. The files you copy off the box
+# (admin.p12, the truststores) are not changed. A link is never followed. Safe to run again. Argument: CONTAINER.
+# Afterwards the container's own user must still be able to open every signing keystore, or sign-in on 8446 would stop: returns 1 if not.
+# The same function is in docker/tak-docker-enable-enrollment.sh, for installs made before this (the CI check
+# .github/ci/test_ca_key_modes.sh runs it and fails if the two copies differ). Needs $DOCKER, log, warn and err.
+lock_ca_keys() {
+    local container="$1" changed
+    changed=$($DOCKER exec -u root "$container" bash -c '
+        cd /opt/tak/certs/files || exit 2
+        n=0
+        lock() {
+            { [ -f "$1" ] && [ ! -L "$1" ]; } || return 0
+            [ "$(stat -c %g:%a "$1")" = "0:640" ] && return 0
+            chgrp -h 0 "$1" && chmod 640 "$1" || exit 1
+            n=$((n + 1))
+        }
+        for f in *-signing.jks *-signing.p12; do
+            lock "$f"
+            lock "${f%-signing.*}.key"
+        done
+        lock ca-do-not-share.key
+        lock root-ca-do-not-share.key
+        echo "$n"') || { warn "Could not set group 0 and mode 640 on the CA keystores and CA keys in /opt/tak/certs/files in $container."; return 1; }
+    $DOCKER exec "$container" bash -c 'for f in /opt/tak/certs/files/*-signing.jks; do [ ! -e "$f" ] || [ -r "$f" ] || exit 1; done' \
+        || { err "TAK Server's own user cannot read a CA signing keystore in /opt/tak/certs/files in $container. Sign-in on 8446 needs it."; return 1; }
+    [ "${changed:-0}" = "0" ] || log "CA keystores and CA keys: group 0, mode 640 (${changed} file(s) changed). Only the owner and group 0 can read them."
+}
+# END lock_ca_keys
+
 # BEGIN fix_cert_folder
 # Installs made before v1.0.2 hand certs/files to 1000:1000 (mode 755, private keys mode 600). The 5.8 hardened container runs as uid 1001 in
 # group 0, so as its own user it cannot write in the folder, and it cannot read the CA key either: "./makeCert.sh client NAME" then fails
@@ -165,6 +200,7 @@ prune_health_list() {
 # group-writable folder and group-readable private keys; this does the same here. Group 0 on the host is only root, so no other host user
 # can read the keys. The owner stays as it is (a root owner becomes 1000, as the installer does). A folder that is already right is left
 # alone, unless "force" is the second argument (after this script ran makeCert.sh as root, its new files belong to root).
+# Either way the CA signing keystores and the CA keys end with group 0 and mode 640 (lock_ca_keys above).
 fix_cert_folder() {
     local container="$1" force="${2:-}" state owner group mode closed
     state=$($DOCKER exec -u root "$container" stat -c '%u %g %a' /opt/tak/certs/files 2>/dev/null) || { warn "Could not look at /opt/tak/certs/files in $container."; return 1; }
@@ -172,12 +208,14 @@ fix_cert_folder() {
     owner=$1; group=$2; mode=$3
     closed=$($DOCKER exec -u root "$container" find /opt/tak/certs/files -maxdepth 1 -name '*.key' ! -perm -g=r 2>/dev/null | head -n 1)
     if [ "$force" != "force" ] && [ "$group" = "0" ] && [ $(( 8#$mode & 8#020 )) -ne 0 ] && [ -z "$closed" ]; then
-        return 0
+        lock_ca_keys "$container"
+        return $?
     fi
     [ "$owner" = "0" ] && owner=1000
     $DOCKER exec -u root "$container" bash -c "chown -R ${owner}:0 /opt/tak/certs/files/ && chmod g+rwx /opt/tak/certs/files/ && find /opt/tak/certs/files -maxdepth 1 -name '*.key' -exec chmod g+r {} +" \
         || { warn "Could not set group 0 on /opt/tak/certs/files in $container."; return 1; }
     log "certs/files is now ${owner}:0 with group write and group-readable keys (it was ${state}), so TAK Server's own user can make certificates."
+    lock_ca_keys "$container"
 }
 # END fix_cert_folder
 

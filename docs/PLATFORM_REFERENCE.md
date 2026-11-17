@@ -80,6 +80,15 @@ Scope: `ubuntu-22.04/` scripts, `docker/` and `patches/`. There are no Rocky/RHE
 | The files in an old install's `tak/health/` belong to uid 1001-or-unknown and root (a bundle unzipped by root keeps the ZIP's owners), so a normal host user cannot write the list; the change needs sudo | observed | ✅ verified Nov 14, 2026 (the fix run as a normal user went through sudo and pruned both lists) |
 | 8446 `/Marti/api/tls/config` answers HTTP 401 without a login, whether or not `certificateSigning` is set, so a 401 does not prove enrollment. The admin certificate gets 403 there on 8443 and 401 on 8446. Only a user with a password gets 200 (set up) or 500 (not set up) | observed | ✅ verified Nov 13, 2026 (same box, before: 401/403, with a file-auth test user: 500, after the script: 200) |
 
+## Certificate files: owners and modes
+
+| Contract | Source | Status |
+|---|---|---|
+| `makeCert.sh` and `makeRootCa.sh` write private keys (`*.key`) with mode 600 (openssl), and every keystore and certificate (`*.jks`, `*.p12`, `*.pem`) with the mode the umask gives. Run as `tak` by the Ubuntu script that is 664; inside the 5.8 hardened container it is 644. This includes `<CA>-signing.jks` and `<CA>-signing.p12`, which `makeCert.sh ca <CA>` makes | `makeCert.sh` and `makeRootCa.sh` in the 5.8 package and bundle (read); observed | ✅ verified Nov 16, 2026 on Ubuntu 22.04 (AWS, fresh-install), `.deb` 5.8-RELEASE84 and Docker 5.8-RELEASE-75 |
+| TAK Server from the `.deb` runs its five Java processes as user `tak`. With `<CA>-signing.jks` and `<CA>-signing.p12` at owner `tak`, mode 600, TAK Server starts, a new client enrolls on 8446, its certificate connects on 8089, and the Hardening script and its guard dogs run | observed | ✅ verified Nov 16, 2026 on Ubuntu 22.04 (AWS, fresh-install), a fresh install and a server installed before |
+| The 5.8 hardened TAK Server container runs as `tak` (uid 1001, group 0); the database container runs as `postgres` (uid 26, group 0) and mounts the same `tak/` folder. With the CA signing keystores and CA keys at group 0, mode 640, TAK Server starts after `docker restart`, a new client enrolls on 8446 and connects on 8089, and `./makeCert.sh client NAME` run as the container's own user makes a complete certificate that connects on 8089 | `docker exec <container> id`; observed | ✅ verified Nov 16, 2026 on Ubuntu 22.04 (AWS, fresh-install), 5.8-RELEASE-75, a fresh install and an install made before |
+| An install made as root keeps its files under `/root/tak-docker` (`INSTALL_DIR="${HOME}/tak-docker"`), and `/root` is mode 700, so other accounts on the host cannot reach `tak/certs/files` whatever the file modes are. The file modes matter when `INSTALL_DIR` is somewhere every account can reach | observed | ✅ verified Nov 16, 2026 on the same box |
+
 ## When this file is wrong or stale
 
 Add the correction below the line it fixes, with the date and the box. If you prove a 📄 line on a real box, change it to `✅ verified <date> on <box>`. Never put passwords, tokens, customer data or private box addresses in this file.
