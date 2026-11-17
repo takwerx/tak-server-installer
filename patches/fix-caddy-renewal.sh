@@ -101,6 +101,7 @@ keytool -importkeystore \\
 rm -f "\$JKS_FILE"
 mv /tmp/takserver-le.jks "\$JKS_FILE"
 chown tak:tak "\$JKS_FILE"
+chmod 600 "\$JKS_FILE"
 rm -f /tmp/takserver-le.p12
 
 # Restart TAK Server only (Caddy stays running)

@@ -237,6 +237,11 @@ Download this file to your computer using:
 - SCP: scp root@YOUR-IP:/opt/tak/certs/files/admin.p12 .
 - SFTP client (FileZilla, WinSCP, Cyberduck, etc.)
 
+Only root and the tak user can read admin.p12 (and user.p12, takserver.jks and the other keystores).
+The scp line above works as before. If you log in as a normal user, copy the file for yourself first:
+  sudo cp /opt/tak/certs/files/admin.p12 ~/ && sudo chown $USER ~/admin.p12
+Then download it from your home folder, and delete the copy there when you are done.
+
 Firefox:
 1. Settings → Privacy & Security → Certificates → View Certificates
 2. Your Certificates → Import
@@ -462,7 +467,7 @@ The same script also brings an old Docker install in line with the current insta
 
 - **Certificates made inside the container.** `tak/certs/files` gets group 0 and group write, and the private keys get group read (the folder keeps the same owner). Before, `docker exec <container> bash -c "cd /opt/tak/certs && ./makeCert.sh client NAME"` printed `Permission denied` and made no `.p12`, although it ended with exit code 0. Always check that `NAME.p12` is there. Group 0 on the host is root only, so other users on the machine still cannot read the keys.
 - **`(unhealthy)` in `docker ps`.** The 5.8 hardened health check also lists a system file that the image no longer has, so both containers stayed `(unhealthy)` while TAK Server worked. The script removes the missing entries from `tak/health/*/critical_file_list.txt` (the original is kept as `critical_file_list.txt.orig`). `docker ps` shows `(healthy)` within a minute or two.
-- **CA keystore permissions.** The CA signing keystores (`<CA name>-signing.jks` and `<CA name>-signing.p12`) and the CA private keys in `tak/certs/files` get group 0 and mode 640, as a new install has them: their owner and group 0 read them, nobody else. Group 0 is the group of the container's own user, and on the host it is root only. `admin.p12` and the truststores are not changed. To do only this by hand: `docker exec -u root takserver-<VERSION> sh -c 'cd /opt/tak/certs/files && chgrp 0 *-signing.jks *-signing.p12 && chmod 640 *-signing.jks *-signing.p12'`.
+- **Keystore and CA key permissions.** Every keystore that holds a private key in `tak/certs/files` (the CA signing keystores `<CA name>-signing.jks` and `.p12`, `admin.p12`, `admin.jks`, `user.p12`, `user.jks`, `takserver.jks`, `takserver.p12` and any client `.p12` you made) and the CA private keys get group 0 and mode 640, as a new install has them: their owner and group 0 read them, nobody else. Group 0 is the group of the container's own user, and on the host it is root only. The user that owns the files (the one who ran the installer, or uid 1000 when root did) still reads `admin.p12` and can copy it as before; another account on the host needs `sudo`. The truststores (`truststore-*`) are not changed: they hold no private key. To do only this by hand: `docker exec -u root takserver-<VERSION> sh -c 'cd /opt/tak/certs/files && for f in *.jks *.p12; do case "$f" in *truststore*) ;; *) chgrp 0 "$f" && chmod 640 "$f";; esac; done'` (the CA keys are done by `sudo ./docker/tak-docker-enable-enrollment.sh`, which does all of it, and is safe to run again).
 
 **Installs made before this fix name only `takserver` in the server certificate.** ATAK then refuses an address or host name. The same script can make a new server certificate with the names you give it:
 
@@ -1295,17 +1300,23 @@ VPS Provider:
 
 ### Certificate file permissions (Ubuntu script installs)
 
-The install script sets the CA signing keystores (`<CA name>-signing.jks` and `<CA name>-signing.p12`) and the CA private keys in `/opt/tak/certs/files` to owner `tak` and mode 600. Only TAK Server reads these files. `admin.p12`, `user.p12`, the truststores and all other files are not changed.
+The install script sets every keystore that holds a private key in `/opt/tak/certs/files` to owner `tak` and mode 600: the CA signing keystores (`<CA name>-signing.jks` and `.p12`), `admin.p12`, `admin.jks`, `user.p12`, `user.jks`, `takserver.jks`, `takserver.p12`, `takserver-le.jks` (the Let's Encrypt keystore, when you use the Caddy script) and any client `.p12`. The CA private keys (`*.key`) are mode 600 as well. Only TAK Server reads these files. The truststores (`truststore-*`) are not changed: they hold no private key and you copy them to phones.
 
-A server installed with an older copy of the script has the two keystores at a wider mode. To give them the same owner and mode, run this once on the server. TAK Server is not restarted and clients stay connected:
+**Copying `admin.p12` off the server.** Only `root` and `tak` can read it. `scp root@YOUR-IP:/opt/tak/certs/files/admin.p12 .` works as before. If you log in as a normal user, copy the file for yourself first, download it, and delete the copy:
 
 ```
-sudo sh -c 'cd /opt/tak/certs/files && chown tak:tak *-signing.jks *-signing.p12 && chmod 600 *-signing.jks *-signing.p12'
+sudo cp /opt/tak/certs/files/admin.p12 ~/ && sudo chown $USER ~/admin.p12
 ```
 
-`Ubuntu_22.04_TAK_Server_Hardening.sh` from a current copy of the scripts does the same when it starts.
+**Server installed with an older copy of the script?** Its keystores have a wider mode (664). To give them the same owner and mode, run this once on the server. TAK Server is not restarted and clients stay connected:
 
-Check: `sudo ls -l /opt/tak/certs/files/ | grep signing` shows `-rw------- 1 tak tak` for both files.
+```
+sudo sh -c 'cd /opt/tak/certs/files && for f in *.jks *.p12; do case "$f" in *truststore*) ;; *) chown tak:tak "$f" && chmod 600 "$f";; esac; done'
+```
+
+`Ubuntu_22.04_TAK_Server_Hardening.sh` from a current copy of the scripts does the same when it starts. A client certificate you make later with `makeCert.sh` is mode 664 again until you run one of these.
+
+Check: `sudo ls -l /opt/tak/certs/files/ | grep -E 'admin|user|takserver|signing'` shows `-rw------- 1 tak tak` for the `.p12` and `.jks` files.
 
 ### Keeping PostgreSQL up to date (Ubuntu script installs)
 

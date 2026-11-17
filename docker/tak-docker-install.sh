@@ -969,16 +969,18 @@ prune_health_list() {
 prune_health_list "$DB_CONTAINER" takserver-db
 prune_health_list "$TAK_CONTAINER" takserver
 
-# BEGIN lock_ca_keys
-# Certificate file permissions (ops #832). makeCert.sh writes the CA signing keystores (<CA>-signing.jks and <CA>-signing.p12) with
-# mode 644. Only TAK Server reads them, to sign the certificates it hands out on 8446. They and the CA private keys (<CA>.key,
-# ca-do-not-share.key, root-ca-do-not-share.key) get group 0 and mode 640: the owner and group 0 read them, nobody else. Group 0 is
-# what the 5.8 hardened container's user (tak, uid 1001) is in, and on the host it is root only. The files you copy off the box
-# (admin.p12, the truststores) are not changed. A link is never followed. Safe to run again. Argument: CONTAINER.
-# Afterwards the container's own user must still be able to open every signing keystore, or sign-in on 8446 would stop: returns 1 if not.
+# BEGIN lock_key_files
+# Certificate file permissions (ops #832, ops #838). makeCert.sh writes every keystore (the CA signing keystores, admin.p12, user.p12,
+# takserver.jks and the others) with mode 644, and TAK Server needs them only to sign certificates (8446), to serve TLS and for its
+# health check. They and the CA private keys (<CA>.key, ca-do-not-share.key, root-ca-do-not-share.key) get group 0 and mode 640: the
+# owner and group 0 read them, nobody else. Group 0 is what the 5.8 hardened container's user (tak, uid 1001) is in, and on the
+# host it is root only. The truststores hold no private key and are copied to phones, so they are not changed (a name with
+# "truststore" in it). A link is never followed. Safe to run again. Argument: CONTAINER.
+# Afterwards the container's own user must still be able to open every keystore, or sign-in on 8446 or the health check would
+# stop: returns 1 if not.
 # The same function is in docker/tak-docker-enable-enrollment.sh, for installs made before this (the CI check
 # .github/ci/test_ca_key_modes.sh runs it and fails if the two copies differ). Needs $DOCKER, log, warn and err.
-lock_ca_keys() {
+lock_key_files() {
     local container="$1" changed
     changed=$($DOCKER exec -u root "$container" bash -c '
         cd /opt/tak/certs/files || exit 2
@@ -989,18 +991,19 @@ lock_ca_keys() {
             chgrp -h 0 "$1" && chmod 640 "$1" || exit 1
             n=$((n + 1))
         }
-        for f in *-signing.jks *-signing.p12; do
+        for f in *.jks *.p12; do
+            case "$f" in *truststore*) continue ;; esac
             lock "$f"
-            lock "${f%-signing.*}.key"
+            case "$f" in *-signing.*) lock "${f%-signing.*}.key" ;; esac
         done
         lock ca-do-not-share.key
         lock root-ca-do-not-share.key
-        echo "$n"') || { warn "Could not set group 0 and mode 640 on the CA keystores and CA keys in /opt/tak/certs/files in $container."; return 1; }
-    $DOCKER exec "$container" bash -c 'for f in /opt/tak/certs/files/*-signing.jks; do [ ! -e "$f" ] || [ -r "$f" ] || exit 1; done' \
-        || { err "TAK Server's own user cannot read a CA signing keystore in /opt/tak/certs/files in $container. Sign-in on 8446 needs it."; return 1; }
-    [ "${changed:-0}" = "0" ] || log "CA keystores and CA keys: group 0, mode 640 (${changed} file(s) changed). Only the owner and group 0 can read them."
+        echo "$n"') || { warn "Could not set group 0 and mode 640 on the keystores and CA keys in /opt/tak/certs/files in $container."; return 1; }
+    $DOCKER exec "$container" bash -c 'for f in /opt/tak/certs/files/*.jks /opt/tak/certs/files/*.p12; do case "${f##*/}" in *truststore*) continue ;; esac; [ ! -e "$f" ] || [ -L "$f" ] || [ -r "$f" ] || exit 1; done' \
+        || { err "TAK Server's own user cannot read a keystore in /opt/tak/certs/files in $container. TAK Server (sign-in on 8446, TLS) and its health check need them."; return 1; }
+    [ "${changed:-0}" = "0" ] || log "Keystores and CA keys: group 0, mode 640 (${changed} file(s) changed). Only the owner and group 0 can read them."
 }
-# END lock_ca_keys
+# END lock_key_files
 
 #----------------------------------------------------------------------
 # 11. Generate Certificates
@@ -1017,8 +1020,8 @@ log "Generating intermediate (signing) CA: ${INTERMEDIATE_CA_NAME}"
 $DOCKER exec $EXEC_TTY "$TAK_CONTAINER" bash -c \
     "cd /opt/tak/certs && echo y | MOVE_CA=true ./makeCert.sh ca ${INTERMEDIATE_CA_NAME}"
 [ -s "tak/certs/files/${INTERMEDIATE_CA_NAME}-signing.jks" ] || { err "No signing keystore was made for ${INTERMEDIATE_CA_NAME}"; exit 1; }
-# the CA keystores exist from here on: close them now, and once more in step 13 when the folder has its final owner
-lock_ca_keys "$TAK_CONTAINER" > /dev/null || true
+# the CA keystores exist from here on: close the keystores made so far now, and all of them once more in step 13 when the folder has its final owner
+lock_key_files "$TAK_CONTAINER" > /dev/null || true
 
 # The server certificate names takserver plus the address and names from step 2b (ops #789): ATAK refuses a certificate that does not
 # name the address its user typed.
@@ -1071,11 +1074,12 @@ $DOCKER exec -u root "$TAK_CONTAINER" bash -c \
 
 log "File permissions fixed (${CERT_UID}:0)"
 
-# The CA signing keystores and the CA keys: owner and group 0 only (see lock_ca_keys above).
-if lock_ca_keys "$TAK_CONTAINER"; then
-    log "CA keystores and CA keys: readable by their owner and group 0 only"
+# Every keystore with a private key (CA signing keystores, admin.p12, user.p12, takserver.jks) and the CA keys: owner and group 0 only
+# (see lock_key_files above). To copy admin.p12 off the box use sudo (or root): the host user that owns it can read it too.
+if lock_key_files "$TAK_CONTAINER"; then
+    log "Keystores and CA keys (admin.p12, user.p12, takserver.jks, CA signing keystores): readable by their owner and group 0 only"
 else
-    warn "Check the CA keystores: docker exec -u root ${TAK_CONTAINER} ls -l /opt/tak/certs/files"
+    warn "Check the keystores: docker exec -u root ${TAK_CONTAINER} ls -l /opt/tak/certs/files"
 fi
 
 #----------------------------------------------------------------------
