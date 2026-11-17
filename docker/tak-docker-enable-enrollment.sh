@@ -13,7 +13,8 @@
 #   2. adds the <certificateSigning> block to tak/CoreConfig.xml (a copy of the old file is kept beside it) and points the
 #      truststore at the one that holds the root and the intermediate (your existing certificates stay trusted)
 #   3. restarts the TAK Server container (about a minute) and checks that 8446 answers; if it does not, it puts the old
-#      CoreConfig.xml back and restarts again
+#      CoreConfig.xml back and restarts again (with --verify-user, an HTTP 401 is not a reason to undo: it means the user name or
+#      password is wrong, so the change stays and the script says to check them)
 #
 # It also brings an old install in line with the current installer in three more ways (they run even when enrollment is already on, and are safe to repeat):
 #   - certs/files gets group 0 and group write, so "./makeCert.sh client NAME" run as the container's own user works (it fails on installs
@@ -471,6 +472,14 @@ main() {
         echo "  Settings > Network Preferences > TAK Server > enter the server address, turn on 'Use Authentication',"
         echo "  and enroll with the username and password."
         print_atak_help "$CFG" "$FILES"
+        echo "  To undo: cp $BACKUP $CFG && docker restart $CONTAINER"
+        return 0
+    fi
+    # With --verify-user, HTTP 401 means "unknown user or wrong password" (TAK Server answers 401 to a bad login whether enrollment is on or not).
+    # It does not show that enrollment is broken, so keep the change. A 500 (CertificateSigning missing) or no answer still rolls back.
+    if [ -n "${TAK_VERIFY_USER:-}" ] && [ "$LAST_CODE" = "401" ]; then
+        warn "8446 answered 401 for ${TAK_VERIFY_USER}: check the user name and password; enrollment itself is on (TAK Server is up with the new config). Not proven yet."
+        echo "  Run this script again with --verify-user NAME for an existing TAK user (and its password), or sign in once from an ATAK device."
         echo "  To undo: cp $BACKUP $CFG && docker restart $CONTAINER"
         return 0
     fi

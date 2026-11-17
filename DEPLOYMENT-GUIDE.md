@@ -474,7 +474,7 @@ List every address and name your users type: the new certificate names `takserve
 
 It keeps the old certificate files in `tak/certs/files/server-cert-before-<time>`, makes the new one with the same CA (phones that trust the CA keep working) and restarts TAK Server. If the new certificate cannot be made, the old files come back. It works on its own too, even when enrollment is already on. At the end it prints the CA file to load into ATAK (see above).
 
-To prove enrollment works, add `--verify-user NAME` with an existing TAK user. The script asks for that user's password (it is not saved) and checks that 8446 answers HTTP 200 for it. Without that option, sign in once from an ATAK device. Running the script a second time changes nothing.
+To prove enrollment works, add `--verify-user NAME` with an existing TAK user. The script asks for that user's password (it is not saved) and checks that 8446 answers HTTP 200 for it. If it answers HTTP 401, the user name or password is wrong: enrollment stays on and the script says to check them (it does not undo the change). Without that option, sign in once from an ATAK device. Running the script a second time changes nothing.
 
 To undo it: `cp tak/CoreConfig.xml.before-enrollment-<date> tak/CoreConfig.xml && docker restart takserver-<VERSION>`.
 

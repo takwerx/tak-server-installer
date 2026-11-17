@@ -2,6 +2,11 @@
 
 What changed for people running these scripts. Newest first.
 
+## Unreleased
+
+### Fixed
+- `tak-docker-enable-enrollment.sh --verify-user`: if TAK Server answers HTTP 401 (wrong user name or password), enrollment now stays on and the script says to check the name and password. Before, it undid the change, although enrollment was fine.
+
 ## v1.0.2 (Mon Nov 16, 2026)
 
 ATAK users can sign in to a Docker install with a username and password on port 8446, and the Docker install works again with TAK Server 5.8, on Rocky/RHEL 9 and as a normal user.
