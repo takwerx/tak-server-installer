@@ -8,6 +8,7 @@ What changed for people running these scripts. Newest first.
 - Docker install: you can pass the path of the TAK Server Docker ZIP (`./docker/tak-docker-install.sh /path/to/takserver-docker-<version>.zip`). The ZIP can be anywhere. With no path, it works as before. A missing file, or a file that is not a `takserver-docker-*.zip`, stops the script before any step. Thanks @tranzmatt.
 - Docker install: warns when the machine has under 8 GB of RAM. It only warns and keeps going. Thanks @tranzmatt.
 - Guide: Raspberry Pi 5 / ARM64 notes, contributed by @tranzmatt from his own Pi 5. We have not tested them.
+- Docker installs: `docker/tak-docker-stop.sh` stops TAK Server, shuts PostgreSQL down cleanly, then stops the database container. A plain `docker stop` kills PostgreSQL, so the next start runs crash recovery and logs "database system was not properly shut down". Use the script before you stop or reboot the machine.
 
 ### Fixed
 - `tak-docker-enable-enrollment.sh --verify-user`: if TAK Server answers HTTP 401 (wrong user name or password), enrollment now stays on and the script says to check the name and password. Before, it undid the change, although enrollment was fine.

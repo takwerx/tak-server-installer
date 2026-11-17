@@ -180,6 +180,16 @@ jobs:
           persist-credentials: false
       - run: bash .github/ci/test_ca_key_modes.sh
 
+  # The script that stops a Docker install without killing PostgreSQL: TAK Server first, then pg_ctl stop -m fast, then the database container (ops #762).
+  docker-stop:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: bash .github/ci/test_docker_stop.sh
+
   # The Docker install warns, and keeps going, on a machine with under 8 GB of RAM (ops #752).
   docker-ram-warning:
     runs-on: ubuntu-24.04
@@ -203,7 +213,7 @@ jobs:
   # One stable name to require in branch protection. A failed or cancelled job fails it.
   checks-ok:
     if: always()
-    needs: [static, release-hygiene, docker-ports, docker-enrollment, docker-engine, docker-enable-enrollment, docker-server-names, db-pgdg-repo, pgdg-key, caddy-key, script-modes, docker-non-root, docker-update-db, ca-key-modes, docker-ram-warning, docker-zip-path]
+    needs: [static, release-hygiene, docker-ports, docker-enrollment, docker-engine, docker-enable-enrollment, docker-server-names, db-pgdg-repo, pgdg-key, caddy-key, script-modes, docker-non-root, docker-update-db, ca-key-modes, docker-ram-warning, docker-zip-path, docker-stop]
     runs-on: ubuntu-24.04
     steps:
       - env:
