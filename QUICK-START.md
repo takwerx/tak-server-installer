@@ -87,6 +87,12 @@ scp root@YOUR-IP:/opt/tak/certs/files/admin.p12 .
 
 Or use an SFTP client like FileZilla, WinSCP, or Cyberduck.
 
+Only `root` and the `tak` user can read `admin.p12`. If you log in as a normal user instead of root, copy the file for yourself first, then download it from your home folder and delete the copy:
+
+```bash
+sudo cp /opt/tak/certs/files/admin.p12 ~/ && sudo chown $USER ~/admin.p12
+```
+
 **Import certificate to your browser:**
 
 - **Firefox:** Settings → Privacy & Security → Certificates → View Certificates → Your Certificates → Import → Select `admin.p12` → Enter password: `atakatak`

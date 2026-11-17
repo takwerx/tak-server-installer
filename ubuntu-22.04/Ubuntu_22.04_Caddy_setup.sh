@@ -252,6 +252,7 @@ keytool -importkeystore \
 # Move to TAK Server certs directory
 mv /tmp/takserver-le.jks /opt/tak/certs/files/
 chown tak:tak /opt/tak/certs/files/takserver-le.jks
+chmod 600 /opt/tak/certs/files/takserver-le.jks
 
 echo "✓ Certificate converted and installed"
 
@@ -346,6 +347,7 @@ keytool -importkeystore \
 rm -f /opt/tak/certs/files/takserver-le.jks
 mv /tmp/takserver-le.jks /opt/tak/certs/files/
 chown tak:tak /opt/tak/certs/files/takserver-le.jks
+chmod 600 /opt/tak/certs/files/takserver-le.jks
 
 # Restart TAK to load the updated keystore (only happens inside the renewal window)
 systemctl restart takserver
