@@ -4,9 +4,10 @@
 #
 # Why: TAK's own database config (tak/db-utils/postgresql.conf, 5.8 bundles) has archive_mode on and an archive_command that copies each
 # finished WAL segment into /var/lib/postgresql/archivedir. That folder does not exist in the container, so every copy fails and
-# PostgreSQL keeps all the segments it could not archive. They are never recycled, so the disk of a busy server fills up over time.
-# (On a test box: 37 files, 592 MB after a big write and a checkpoint, and still 37 after the data was deleted.) Installs made with
-# tak-docker-install.sh v1.0.3 or later are already fixed. This script fixes the ones made before.
+# PostgreSQL keeps all the segments it could not archive. A healthy PostgreSQL keeps its WAL folder near max_wal_size (1 GB here);
+# with the failing copy it grows with every write and is never recycled, so the disk of a busy server fills up over time.
+# (Test box, same writes each round: 592 MB and steady with the fix; 592, 1120, 1680, 2224 MB and rising without it.)
+# Installs made with tak-docker-install.sh v1.0.3 or later are already fixed. This script fixes the ones made before.
 #
 # What it does (no restart, no stop of TAK Server, about 1 minute):
 #   1. looks at the running database: archiving on, archive_command is TAK's default, and the folder really is missing.
@@ -14,7 +15,8 @@
 #   2. sets archive_command to /bin/true (the PostgreSQL manual's way to switch archiving off without a restart) and reloads the config.
 #      PostgreSQL then counts each waiting segment as archived. Nothing was ever archived, so nothing is lost.
 #   3. fixes the same line in the bundle's tak/db-utils/postgresql.conf, because the database container copies that file in at each start.
-#   4. waits until the waiting segments are counted, runs a checkpoint and shows the WAL files and size before and after.
+#   4. waits until the waiting segments are counted, runs a checkpoint and shows the WAL files and size before and after
+#      (a backlog drops to about max_wal_size at once).
 #
 # Run it on the machine that runs the containers, from a copy of this repo:   ./docker/tak-docker-fix-wal.sh
 #   --check            only look and say what it would change
@@ -195,7 +197,7 @@ main() {
     dbq "$DB" 'checkpoint' > /dev/null
     log "WAL files and size before: ${BEFORE:-unknown}"
     log "WAL files and size after:  $(wal_size "$DB")"
-    log "Done. PostgreSQL now recycles WAL files by itself; the size keeps falling over the next checkpoints."
+    log "Done. PostgreSQL now recycles WAL files by itself, so the WAL folder stays near 1 GB (max_wal_size) instead of growing."
     return 0
 }
 

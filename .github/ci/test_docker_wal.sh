@@ -3,8 +3,9 @@
 #
 # Field (found in the v1.0.3 test run, Nov 16, 2026): TAK's own database config (tak/db-utils/postgresql.conf) has archive_mode on and
 # archive_command 'cp "%p" "/var/lib/postgresql/archivedir/%f"'. That folder does not exist in the container, so every copy fails and
-# PostgreSQL keeps every WAL segment it could not archive (on a test box: 37 files, 592 MB after a big write, unchanged after the data
-# was deleted). The disk of a busy server fills up. The installer now sets archive_command to /bin/true in the config before the
+# PostgreSQL keeps every WAL segment it could not archive. A healthy server keeps its WAL near max_wal_size (1 GB); on a test box, with
+# the same writes each round, the folder stayed at 592 MB with the fix and grew 592, 1120, 1680, 2224 MB without it. The disk of a busy
+# server fills up. The installer now sets archive_command to /bin/true in the config before the
 # database first starts, and docker/tak-docker-fix-wal.sh does the same on an install that already exists, without a restart.
 # This check runs the real functions on TAK's real config lines, and the script against a fake `docker` that keeps a little state,
 # so no Docker, no root and no network are needed:
