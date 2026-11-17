@@ -80,6 +80,16 @@ jobs:
           persist-credentials: false
       - run: bash .github/ci/test_docker_server_names.sh
 
+  # The Docker install can run with nobody at the keyboard (cloud-init, Ansible, CI): TAK_INTERFACE and TAK_DOCKER_ZIP answer its questions, and docker exec gets no -it without a terminal (ops #794).
+  docker-unattended:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: bash .github/ci/test_docker_unattended.sh
+
   # The Docker install puts real Docker on Rocky / RHEL, not the podman-docker stand-in that has no docker.service (ops #727).
   docker-engine:
     runs-on: ubuntu-24.04
