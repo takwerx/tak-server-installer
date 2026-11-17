@@ -13,13 +13,17 @@
 #   2. adds the <certificateSigning> block to tak/CoreConfig.xml (a copy of the old file is kept beside it) and points the
 #      truststore at the one that holds the root and the intermediate (your existing certificates stay trusted)
 #   3. restarts the TAK Server container (about a minute) and checks that 8446 answers; if it does not, it puts the old
-#      CoreConfig.xml back and restarts again
+#      CoreConfig.xml back and restarts again (with --verify-user, an HTTP 401 is not a reason to undo: it means the user name or
+#      password is wrong, so the change stays and the script says to check them)
 #
-# It also brings an old install in line with v1.0.2 in two more ways (they run even when enrollment is already on, and are safe to repeat):
+# It also brings an old install in line with the current installer in three more ways (they run even when enrollment is already on, and are safe to repeat):
 #   - certs/files gets group 0 and group write, so "./makeCert.sh client NAME" run as the container's own user works (it fails on installs
 #     made before v1.0.2). The owner stays; keys keep their owner-only mode.
 #   - the 5.8 hardened health check lists a file the image does not ship, so docker ps shows both containers "(unhealthy)" while TAK
 #     Server works. Entries missing from the image are dropped from tak/health/*/critical_file_list.txt (a copy is kept as .orig).
+#   - every keystore with a private key (the CA signing keystores, admin.p12, user.p12, takserver.jks, any client .p12) and the CA keys
+#     get group 0 and mode 640, so only their owner and group 0 read them (older installs leave them at mode 644). Truststores are not
+#     changed. No restart.
 #
 # Run it on the machine that runs the containers, from a copy of this repo:   sudo ./docker/tak-docker-enable-enrollment.sh
 # (use sudo: an install made with sudo has a tak/ folder that belongs to root, and a normal user cannot change CoreConfig.xml there)
@@ -54,7 +58,7 @@ enable_enrollment() {
 }
 # END enable_enrollment
 
-# Copies (as_root, server_names and prune_health_list are copied from tak-docker-install.sh; the CI check .github/ci/test_docker_non_root.sh fails if the copies differ)
+# Copies (as_root, server_names, prune_health_list and lock_key_files are copied from tak-docker-install.sh; the CI checks test_docker_non_root.sh and test_ca_key_modes.sh fail if the copies differ)
 # BEGIN as_root
 # Run a command as root: directly when the script already runs as root, through sudo otherwise.
 # Needed for ownership changes (chown/chgrp to another user or group), which a normal user cannot make.
@@ -158,6 +162,42 @@ prune_health_list() {
 }
 # END prune_health_list
 
+# BEGIN lock_key_files
+# Certificate file permissions (ops #832, ops #838). makeCert.sh writes every keystore (the CA signing keystores, admin.p12, user.p12,
+# takserver.jks and the others) with mode 644, and TAK Server needs them only to sign certificates (8446), to serve TLS and for its
+# health check. They and the CA private keys (<CA>.key, ca-do-not-share.key, root-ca-do-not-share.key) get group 0 and mode 640: the
+# owner and group 0 read them, nobody else. Group 0 is what the 5.8 hardened container's user (tak, uid 1001) is in, and on the
+# host it is root only. The truststores hold no private key and are copied to phones, so they are not changed (a name with
+# "truststore" in it). A link is never followed. Safe to run again. Argument: CONTAINER.
+# Afterwards the container's own user must still be able to open every keystore, or sign-in on 8446 or the health check would
+# stop: returns 1 if not.
+# The same function is in docker/tak-docker-enable-enrollment.sh, for installs made before this (the CI check
+# .github/ci/test_ca_key_modes.sh runs it and fails if the two copies differ). Needs $DOCKER, log, warn and err.
+lock_key_files() {
+    local container="$1" changed
+    changed=$($DOCKER exec -u root "$container" bash -c '
+        cd /opt/tak/certs/files || exit 2
+        n=0
+        lock() {
+            { [ -f "$1" ] && [ ! -L "$1" ]; } || return 0
+            [ "$(stat -c %g:%a "$1")" = "0:640" ] && return 0
+            chgrp -h 0 "$1" && chmod 640 "$1" || exit 1
+            n=$((n + 1))
+        }
+        for f in *.jks *.p12; do
+            case "$f" in *truststore*) continue ;; esac
+            lock "$f"
+            case "$f" in *-signing.*) lock "${f%-signing.*}.key" ;; esac
+        done
+        lock ca-do-not-share.key
+        lock root-ca-do-not-share.key
+        echo "$n"') || { warn "Could not set group 0 and mode 640 on the keystores and CA keys in /opt/tak/certs/files in $container."; return 1; }
+    $DOCKER exec "$container" bash -c 'for f in /opt/tak/certs/files/*.jks /opt/tak/certs/files/*.p12; do case "${f##*/}" in *truststore*) continue ;; esac; [ ! -e "$f" ] || [ -L "$f" ] || [ -r "$f" ] || exit 1; done' \
+        || { err "TAK Server's own user cannot read a keystore in /opt/tak/certs/files in $container. TAK Server (sign-in on 8446, TLS) and its health check need them."; return 1; }
+    [ "${changed:-0}" = "0" ] || log "Keystores and CA keys: group 0, mode 640 (${changed} file(s) changed). Only the owner and group 0 can read them."
+}
+# END lock_key_files
+
 # BEGIN fix_cert_folder
 # Installs made before v1.0.2 hand certs/files to 1000:1000 (mode 755, private keys mode 600). The 5.8 hardened container runs as uid 1001 in
 # group 0, so as its own user it cannot write in the folder, and it cannot read the CA key either: "./makeCert.sh client NAME" then fails
@@ -165,6 +205,7 @@ prune_health_list() {
 # group-writable folder and group-readable private keys; this does the same here. Group 0 on the host is only root, so no other host user
 # can read the keys. The owner stays as it is (a root owner becomes 1000, as the installer does). A folder that is already right is left
 # alone, unless "force" is the second argument (after this script ran makeCert.sh as root, its new files belong to root).
+# Either way the keystores and the CA keys end with group 0 and mode 640 (lock_key_files above).
 fix_cert_folder() {
     local container="$1" force="${2:-}" state owner group mode closed
     state=$($DOCKER exec -u root "$container" stat -c '%u %g %a' /opt/tak/certs/files 2>/dev/null) || { warn "Could not look at /opt/tak/certs/files in $container."; return 1; }
@@ -172,12 +213,14 @@ fix_cert_folder() {
     owner=$1; group=$2; mode=$3
     closed=$($DOCKER exec -u root "$container" find /opt/tak/certs/files -maxdepth 1 -name '*.key' ! -perm -g=r 2>/dev/null | head -n 1)
     if [ "$force" != "force" ] && [ "$group" = "0" ] && [ $(( 8#$mode & 8#020 )) -ne 0 ] && [ -z "$closed" ]; then
-        return 0
+        lock_key_files "$container"
+        return $?
     fi
     [ "$owner" = "0" ] && owner=1000
     $DOCKER exec -u root "$container" bash -c "chown -R ${owner}:0 /opt/tak/certs/files/ && chmod g+rwx /opt/tak/certs/files/ && find /opt/tak/certs/files -maxdepth 1 -name '*.key' -exec chmod g+r {} +" \
         || { warn "Could not set group 0 on /opt/tak/certs/files in $container."; return 1; }
     log "certs/files is now ${owner}:0 with group write and group-readable keys (it was ${state}), so TAK Server's own user can make certificates."
+    lock_key_files "$container"
 }
 # END fix_cert_folder
 
@@ -433,6 +476,14 @@ main() {
         echo "  Settings > Network Preferences > TAK Server > enter the server address, turn on 'Use Authentication',"
         echo "  and enroll with the username and password."
         print_atak_help "$CFG" "$FILES"
+        echo "  To undo: cp $BACKUP $CFG && docker restart $CONTAINER"
+        return 0
+    fi
+    # With --verify-user, HTTP 401 means "unknown user or wrong password" (TAK Server answers 401 to a bad login whether enrollment is on or not).
+    # It does not show that enrollment is broken, so keep the change. A 500 (CertificateSigning missing) or no answer still rolls back.
+    if [ -n "${TAK_VERIFY_USER:-}" ] && [ "$LAST_CODE" = "401" ]; then
+        warn "8446 answered 401 for ${TAK_VERIFY_USER}: check the user name and password; enrollment itself is on (TAK Server is up with the new config). Not proven yet."
+        echo "  Run this script again with --verify-user NAME for an existing TAK user (and its password), or sign in once from an ATAK device."
         echo "  To undo: cp $BACKUP $CFG && docker restart $CONTAINER"
         return 0
     fi

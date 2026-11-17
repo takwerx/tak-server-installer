@@ -24,7 +24,7 @@ NC='\033[0m'
 
 log()  { echo -e "${GRN}[+]${NC} $1"; }
 warn() { echo -e "${YEL}[!]${NC} $1"; }
-err()  { echo -e "${RED}[ERROR]${NC} $1"; }
+err()  { echo -e "${RED}[ERROR]${NC} $1" >&2; }   # stderr, like the other Docker scripts: the name checks throw stdout away (ops #795)
 step() { echo -e "\n${CYN}=== STEP $1 ===${NC}"; }
 
 # BEGIN as_root
@@ -38,6 +38,41 @@ as_root() {
     fi
 }
 # END as_root
+
+# BEGIN unattended
+# Runs without a person at the keyboard (cloud-init, Ansible, CI; ops #794). Three things used to need a terminal: the interface question,
+# the ZIP question (only when several ZIPs are in the folder) and `docker exec -it`, which stops with "the input device is not a TTY".
+# TAK_INTERFACE and TAK_DOCKER_ZIP answer the two questions up front. With a terminal nothing changes.
+
+# Prints "-it" when the script has a terminal to give the container, and nothing when it has none.
+exec_tty_flags() {
+    if [ -t 0 ]; then echo "-it"; fi
+}
+
+# Prints the 0-based position of the wanted interface in the list. WANT is a name (eth0) or an IPv4 address. Each other argument is
+# "NAME ADDRESS". Prints nothing and returns 1 when none matches.
+iface_index() {
+    local want="$1" i=0 line
+    shift
+    for line in "$@"; do
+        case " $line " in *" $want "*) echo "$i"; return 0 ;; esac
+        i=$((i + 1))
+    done
+    return 1
+}
+
+# Prints the 0-based position of the wanted ZIP in the list. WANT is a file name or a full path. Each other argument is a full path.
+# Prints nothing and returns 1 when none matches.
+zip_index() {
+    local want="$1" i=0 z
+    shift
+    for z in "$@"; do
+        if [ "$z" = "$want" ] || [ "$(basename "$z")" = "$want" ]; then echo "$i"; return 0; fi
+        i=$((i + 1))
+    done
+    return 1
+}
+# END unattended
 
 # BEGIN server_names
 # The names in the TAK Server certificate (ops #789). ATAK checks the address a user types against the names in the server certificate on
@@ -244,6 +279,10 @@ else
     DOCKER="docker"
 fi
 
+# "-it" for the `docker exec` lines when a person is at a terminal, nothing when not (cloud-init, Ansible, CI), so they do not stop with
+# "the input device is not a TTY" (ops #794).
+EXEC_TTY=$(exec_tty_flags)
+
 # BuildKit (docker buildx). The 5.8 hardened Dockerfiles read ARG TARGETARCH,
 # which only BuildKit fills in; the legacy builder leaves it empty and the
 # database image build fails on a 404 for the PostgreSQL repo package.
@@ -338,9 +377,19 @@ else
         echo "  $((i+1))) $(basename "${ZIPS[$i]}")"
     done
     echo ""
-    read -r -p "Select ZIP to install [1]: " ZIP_SEL
-    ZIP_SEL=${ZIP_SEL:-1}
-    ZIP_SEL=$((ZIP_SEL - 1))
+    if [ -n "${TAK_DOCKER_ZIP:-}" ]; then
+        ZIP_SEL=$(zip_index "$TAK_DOCKER_ZIP" "${ZIPS[@]}") || { err "TAK_DOCKER_ZIP=${TAK_DOCKER_ZIP} is not one of the ZIPs listed above (use the file name)."; exit 1; }
+    else
+        ZIP_EOF=0
+        read -r -p "Select ZIP to install [1]: " ZIP_SEL || ZIP_EOF=1
+        if [ "$ZIP_EOF" = 1 ]; then
+            err "More than one ZIP is in ${INSTALL_DIR} and there is no terminal to choose one."
+            echo "  Set TAK_DOCKER_ZIP to the file name, for example: TAK_DOCKER_ZIP=$(basename "${ZIPS[0]}") ./docker/tak-docker-install.sh"
+            exit 1
+        fi
+        ZIP_SEL=${ZIP_SEL:-1}
+        ZIP_SEL=$((ZIP_SEL - 1))
+    fi
     TAK_ZIP="${ZIPS[$ZIP_SEL]}"
 fi
 
@@ -367,9 +416,18 @@ for i in "${!IFACES[@]}"; do
 done
 
 echo ""
-read -r -p "Select interface [1]: " NIC_SEL
-NIC_SEL=${NIC_SEL:-1}
-NIC_SEL=$((NIC_SEL - 1))
+if [ -n "${TAK_INTERFACE:-}" ]; then
+    NIC_SEL=$(iface_index "$TAK_INTERFACE" "${IFACES[@]}") || { err "TAK_INTERFACE=${TAK_INTERFACE} is not one of the interfaces listed above (use a name such as eth0, or its address)."; exit 1; }
+else
+    NIC_EOF=0
+    read -r -p "Select interface [1]: " NIC_SEL || NIC_EOF=1
+    if [ "$NIC_EOF" = 1 ]; then
+        echo ""
+        warn "No terminal to answer on and TAK_INTERFACE is not set: using interface 1. Set TAK_INTERFACE (a name such as eth0, or its address) to choose."
+    fi
+    NIC_SEL=${NIC_SEL:-1}
+    NIC_SEL=$((NIC_SEL - 1))
+fi
 
 SERVER_IP=$(echo "${IFACES[$NIC_SEL]}" | awk '{print $2}')
 NIC_NAME=$(echo "${IFACES[$NIC_SEL]}" | awk '{print $1}')
@@ -911,21 +969,59 @@ prune_health_list() {
 prune_health_list "$DB_CONTAINER" takserver-db
 prune_health_list "$TAK_CONTAINER" takserver
 
+# BEGIN lock_key_files
+# Certificate file permissions (ops #832, ops #838). makeCert.sh writes every keystore (the CA signing keystores, admin.p12, user.p12,
+# takserver.jks and the others) with mode 644, and TAK Server needs them only to sign certificates (8446), to serve TLS and for its
+# health check. They and the CA private keys (<CA>.key, ca-do-not-share.key, root-ca-do-not-share.key) get group 0 and mode 640: the
+# owner and group 0 read them, nobody else. Group 0 is what the 5.8 hardened container's user (tak, uid 1001) is in, and on the
+# host it is root only. The truststores hold no private key and are copied to phones, so they are not changed (a name with
+# "truststore" in it). A link is never followed. Safe to run again. Argument: CONTAINER.
+# Afterwards the container's own user must still be able to open every keystore, or sign-in on 8446 or the health check would
+# stop: returns 1 if not.
+# The same function is in docker/tak-docker-enable-enrollment.sh, for installs made before this (the CI check
+# .github/ci/test_ca_key_modes.sh runs it and fails if the two copies differ). Needs $DOCKER, log, warn and err.
+lock_key_files() {
+    local container="$1" changed
+    changed=$($DOCKER exec -u root "$container" bash -c '
+        cd /opt/tak/certs/files || exit 2
+        n=0
+        lock() {
+            { [ -f "$1" ] && [ ! -L "$1" ]; } || return 0
+            [ "$(stat -c %g:%a "$1")" = "0:640" ] && return 0
+            chgrp -h 0 "$1" && chmod 640 "$1" || exit 1
+            n=$((n + 1))
+        }
+        for f in *.jks *.p12; do
+            case "$f" in *truststore*) continue ;; esac
+            lock "$f"
+            case "$f" in *-signing.*) lock "${f%-signing.*}.key" ;; esac
+        done
+        lock ca-do-not-share.key
+        lock root-ca-do-not-share.key
+        echo "$n"') || { warn "Could not set group 0 and mode 640 on the keystores and CA keys in /opt/tak/certs/files in $container."; return 1; }
+    $DOCKER exec "$container" bash -c 'for f in /opt/tak/certs/files/*.jks /opt/tak/certs/files/*.p12; do case "${f##*/}" in *truststore*) continue ;; esac; [ ! -e "$f" ] || [ -L "$f" ] || [ -r "$f" ] || exit 1; done' \
+        || { err "TAK Server's own user cannot read a keystore in /opt/tak/certs/files in $container. TAK Server (sign-in on 8446, TLS) and its health check need them."; return 1; }
+    [ "${changed:-0}" = "0" ] || log "Keystores and CA keys: group 0, mode 640 (${changed} file(s) changed). Only the owner and group 0 can read them."
+}
+# END lock_key_files
+
 #----------------------------------------------------------------------
 # 11. Generate Certificates
 #----------------------------------------------------------------------
 step "11: Generate Certificates"
 
 log "Generating Root CA: ${CA_NAME}"
-$DOCKER exec -it "$TAK_CONTAINER" bash -c \
+$DOCKER exec $EXEC_TTY "$TAK_CONTAINER" bash -c \
     "cd /opt/tak/certs && ./makeRootCa.sh --ca-name ${CA_NAME}"
 
 # An intermediate CA, like the Ubuntu installer makes. TAK Server signs the certificates it hands out on 8446 with its keystore
 # (${INTERMEDIATE_CA_NAME}-signing.jks). MOVE_CA=true and the "y" answer make later certificates (server, admin) signed by it too.
 log "Generating intermediate (signing) CA: ${INTERMEDIATE_CA_NAME}"
-$DOCKER exec -it "$TAK_CONTAINER" bash -c \
+$DOCKER exec $EXEC_TTY "$TAK_CONTAINER" bash -c \
     "cd /opt/tak/certs && echo y | MOVE_CA=true ./makeCert.sh ca ${INTERMEDIATE_CA_NAME}"
 [ -s "tak/certs/files/${INTERMEDIATE_CA_NAME}-signing.jks" ] || { err "No signing keystore was made for ${INTERMEDIATE_CA_NAME}"; exit 1; }
+# the CA keystores exist from here on: close the keystores made so far now, and all of them once more in step 13 when the folder has its final owner
+lock_key_files "$TAK_CONTAINER" > /dev/null || true
 
 # The server certificate names takserver plus the address and names from step 2b (ops #789): ATAK refuses a certificate that does not
 # name the address its user typed.
@@ -933,7 +1029,7 @@ log "Generating server certificate: ${CERT_NAMES_SHOWN}"
 make_server_cert "$TAK_CONTAINER" "$CERT_NAMES" || exit 1
 
 log "Generating admin certificate: ${ADMIN_CERT}"
-$DOCKER exec -it "$TAK_CONTAINER" bash -c \
+$DOCKER exec $EXEC_TTY "$TAK_CONTAINER" bash -c \
     "cd /opt/tak/certs && ./makeCert.sh client ${ADMIN_CERT}"
 
 log "Enabling certificate enrollment on 8446"
@@ -977,6 +1073,14 @@ $DOCKER exec -u root "$TAK_CONTAINER" bash -c \
     "chown -R ${CERT_UID}:0 /opt/tak/certs/files/ && chmod g+rwx /opt/tak/certs/files/ && find /opt/tak/certs/files -maxdepth 1 -name '*.key' -exec chmod g+r {} +"
 
 log "File permissions fixed (${CERT_UID}:0)"
+
+# Every keystore with a private key (CA signing keystores, admin.p12, user.p12, takserver.jks) and the CA keys: owner and group 0 only
+# (see lock_key_files above). To copy admin.p12 off the box use sudo (or root): the host user that owns it can read it too.
+if lock_key_files "$TAK_CONTAINER"; then
+    log "Keystores and CA keys (admin.p12, user.p12, takserver.jks, CA signing keystores): readable by their owner and group 0 only"
+else
+    warn "Check the keystores: docker exec -u root ${TAK_CONTAINER} ls -l /opt/tak/certs/files"
+fi
 
 #----------------------------------------------------------------------
 # 14. Verify
@@ -1046,7 +1150,7 @@ echo ""
 echo "  Docker commands (run from $(pwd)):"
 echo "    Logs:    docker logs -f ${TAK_CONTAINER}"
 echo "    DB Logs: docker logs -f ${DB_CONTAINER}"
-echo "    Stop:    docker stop ${TAK_CONTAINER} ${DB_CONTAINER}"
+echo "    Stop:    ${SCRIPT_DIR}/tak-docker-stop.sh   (shuts PostgreSQL down cleanly; a plain docker stop of ${DB_CONTAINER} kills it)"
 echo "    Start:   docker start ${DB_CONTAINER} ${TAK_CONTAINER}"
 echo "    Shell:   docker exec -it ${TAK_CONTAINER} bash"
 echo "    Restart: docker restart ${TAK_CONTAINER}"

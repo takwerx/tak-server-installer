@@ -36,6 +36,46 @@ if [ ! -d "/opt/tak" ]; then
     exit 1
 fi
 
+# Certificate file permissions (ops #832, ops #838). Every keystore (the CA signing keystores, admin.p12, user.p12, takserver.jks,
+# takserver-le.jks and the others) and the CA private keys get owner tak and mode 600: only TAK Server (user tak) reads them.
+# New installs get this from the install script; this does the same on a server installed before that. No restart, and safe to
+# run again. The truststores are not changed (no private key; they are copied to phones). To copy admin.p12 off the server,
+# use root (scp root@...) or sudo. The two functions are copies of the ones in
+# Ubuntu_22.04_TAK_Server_install.sh (the CI check .github/ci/test_ca_key_modes.sh fails if the copies differ).
+# BEGIN lock_key_files
+# One file: owner-only for OWNER. A missing file is fine, and a link is never followed. Arguments: FILE OWNER.
+lock_key_file() {
+    { [ -f "$1" ] && [ ! -L "$1" ]; } || return 0
+    chown -h "$2" "$1" && chmod 600 "$1"
+}
+
+# Every file in FOLDER (default /opt/tak/certs/files) that holds a private key gets OWNER (default tak:tak) and mode 600:
+# every keystore (*.jks and *.p12: the CA signing keystores, admin, user, takserver, takserver-le and any client certificate
+# made with makeCert.sh) except a truststore (its name has "truststore" in it: it holds certificates only and is copied to phones),
+# and the CA private keys (<CA>.key of each signing keystore, ca-do-not-share.key, root-ca-do-not-share.key).
+# Safe to run again. Returns 1 if a file could not be changed.
+lock_key_files() {
+    local dir="${1:-/opt/tak/certs/files}" owner="${2:-tak:tak}" f rc=0
+    [ -d "$dir" ] || return 0
+    for f in "$dir"/*.jks "$dir"/*.p12; do
+        case "${f##*/}" in *truststore*) continue ;; esac
+        lock_key_file "$f" "$owner" || rc=1
+        case "${f##*/}" in *-signing.*) lock_key_file "${f%-signing.*}.key" "$owner" || rc=1 ;; esac
+    done
+    for f in "$dir"/ca-do-not-share.key "$dir"/root-ca-do-not-share.key; do
+        lock_key_file "$f" "$owner" || rc=1
+    done
+    return $rc
+}
+# END lock_key_files
+if lock_key_files /opt/tak/certs/files tak:tak; then
+    echo "✓ Keystores and CA keys (admin.p12, user.p12, takserver.jks, CA signing keystores): owner tak, mode 600"
+else
+    echo "⚠ WARNING: Could not set owner tak and mode 600 on every keystore and CA key in /opt/tak/certs/files"
+    echo "  Check them: ls -l /opt/tak/certs/files/*.p12 /opt/tak/certs/files/*.jks /opt/tak/certs/files/*.key"
+fi
+echo ""
+
 # Check for unattended-upgrades running
 echo "Checking for system upgrades in progress..."
 if pgrep -f "/usr/bin/unattended-upgrade$" > /dev/null; then
@@ -1816,6 +1856,7 @@ keytool -importkeystore \
 rm /opt/tak/certs/files/takserver-le.jks
 mv /tmp/takserver-le.jks /opt/tak/certs/files/
 chown tak:tak /opt/tak/certs/files/takserver-le.jks
+chmod 600 /opt/tak/certs/files/takserver-le.jks
 
 # Stop Caddy
 systemctl stop caddy

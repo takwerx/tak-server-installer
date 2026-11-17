@@ -237,6 +237,11 @@ Download this file to your computer using:
 - SCP: scp root@YOUR-IP:/opt/tak/certs/files/admin.p12 .
 - SFTP client (FileZilla, WinSCP, Cyberduck, etc.)
 
+Only root and the tak user can read admin.p12 (and user.p12, takserver.jks and the other keystores).
+The scp line above works as before. If you log in as a normal user, copy the file for yourself first:
+  sudo cp /opt/tak/certs/files/admin.p12 ~/ && sudo chown $USER ~/admin.p12
+Then download it from your home folder, and delete the copy there when you are done.
+
 Firefox:
 1. Settings → Privacy & Security → Certificates → View Certificates
 2. Your Certificates → Import
@@ -349,6 +354,18 @@ Edit variables at the top of `docker/tak-docker-install.sh` (CA name, org fields
 
 The script asks one question about ATAK: **the address or name your ATAK users will type to reach the server**. Press Enter to use this machine's own address. If your users connect by the public address or a host name, type it here (several: separate them with commas). It goes into the server certificate. To skip the question, set `TAK_SERVER_NAMES` first, for example `TAK_SERVER_NAMES=203.0.113.10,tak.example.org ./docker/tak-docker-install.sh`. IPv4 addresses and plain host names work (no `*` names, no IPv6).
 
+#### Running it with nobody at the keyboard (cloud-init, Ansible, CI)
+
+The script can run without a terminal. Two questions need an answer up front, and the rest has a default:
+
+- `TAK_INTERFACE`: the network interface to use, by name (`eth0`) or by its IPv4 address. Without it, the script uses the first interface in the list and says so.
+- `TAK_DOCKER_ZIP`: the ZIP file name, only needed when more than one `takserver-docker-*.zip` is in `~/tak-docker`. Without it and with more than one ZIP, the script stops and tells you to set it (it never guesses which TAK Server version to install).
+- `TAK_SERVER_NAMES`: the address or name your ATAK users type (see above). Without it, the script uses the interface's address.
+
+```
+TAK_INTERFACE=eth0 TAK_SERVER_NAMES=tak.example.org ./docker/tak-docker-install.sh < /dev/null
+```
+
 ### Signing in from ATAK with a username and password (port 8446)
 
 Two things must be true on each phone, or ATAK refuses the sign-in:
@@ -446,10 +463,11 @@ Use `sudo`. If you installed with `sudo` (most people did), the `tak/` folder be
 
 It makes an intermediate signing CA under your root CA, adds the `certificateSigning` block to `tak/CoreConfig.xml` (the old file is kept beside it, with the date in its name) and restarts the TAK Server container, which takes about a minute. The database, users, existing certificates and ports are not changed, and `ca.pem` stays your root CA, so certificates you make later with `makeCert.sh` are signed as before. If TAK Server does not come back, the script puts the old `CoreConfig.xml` back and restarts it again.
 
-The same script also brings an old Docker install in line with v1.0.2 in two more ways. It does them whether or not enrollment is already on, and they need no restart:
+The same script also brings an old Docker install in line with the current installer in three more ways. It does them whether or not enrollment is already on, and they need no restart:
 
 - **Certificates made inside the container.** `tak/certs/files` gets group 0 and group write, and the private keys get group read (the folder keeps the same owner). Before, `docker exec <container> bash -c "cd /opt/tak/certs && ./makeCert.sh client NAME"` printed `Permission denied` and made no `.p12`, although it ended with exit code 0. Always check that `NAME.p12` is there. Group 0 on the host is root only, so other users on the machine still cannot read the keys.
 - **`(unhealthy)` in `docker ps`.** The 5.8 hardened health check also lists a system file that the image no longer has, so both containers stayed `(unhealthy)` while TAK Server worked. The script removes the missing entries from `tak/health/*/critical_file_list.txt` (the original is kept as `critical_file_list.txt.orig`). `docker ps` shows `(healthy)` within a minute or two.
+- **Keystore and CA key permissions.** Every keystore that holds a private key in `tak/certs/files` (the CA signing keystores `<CA name>-signing.jks` and `.p12`, `admin.p12`, `admin.jks`, `user.p12`, `user.jks`, `takserver.jks`, `takserver.p12` and any client `.p12` you made) and the CA private keys get group 0 and mode 640, as a new install has them: their owner and group 0 read them, nobody else. Group 0 is the group of the container's own user, and on the host it is root only. The user that owns the files (the one who ran the installer, or uid 1000 when root did) still reads `admin.p12` and can copy it as before; another account on the host needs `sudo`. The truststores (`truststore-*`) are not changed: they hold no private key. To do only this by hand: `docker exec -u root takserver-<VERSION> sh -c 'cd /opt/tak/certs/files && for f in *.jks *.p12; do case "$f" in *truststore*) ;; *) chgrp 0 "$f" && chmod 640 "$f";; esac; done'` (the CA keys are done by `sudo ./docker/tak-docker-enable-enrollment.sh`, which does all of it, and is safe to run again).
 
 **Installs made before this fix name only `takserver` in the server certificate.** ATAK then refuses an address or host name. The same script can make a new server certificate with the names you give it:
 
@@ -461,9 +479,23 @@ List every address and name your users type: the new certificate names `takserve
 
 It keeps the old certificate files in `tak/certs/files/server-cert-before-<time>`, makes the new one with the same CA (phones that trust the CA keep working) and restarts TAK Server. If the new certificate cannot be made, the old files come back. It works on its own too, even when enrollment is already on. At the end it prints the CA file to load into ATAK (see above).
 
-To prove enrollment works, add `--verify-user NAME` with an existing TAK user. The script asks for that user's password (it is not saved) and checks that 8446 answers HTTP 200 for it. Without that option, sign in once from an ATAK device. Running the script a second time changes nothing.
+To prove enrollment works, add `--verify-user NAME` with an existing TAK user. The script asks for that user's password (it is not saved) and checks that 8446 answers HTTP 200 for it. If it answers HTTP 401, the user name or password is wrong: enrollment stays on and the script says to check them (it does not undo the change). Without that option, sign in once from an ATAK device. Running the script a second time changes nothing.
 
 To undo it: `cp tak/CoreConfig.xml.before-enrollment-<date> tak/CoreConfig.xml && docker restart takserver-<VERSION>`.
+
+### Stopping and starting a Docker install
+
+Stop the install with this script, from a copy of this repo, on the machine that runs TAK Server:
+
+```
+./docker/tak-docker-stop.sh
+```
+
+It stops TAK Server, shuts PostgreSQL down the proper way (`pg_ctl stop -m fast`), and then stops the database container. Start the install again with `docker start takserver-db-<VERSION> takserver-<VERSION>` (the installer prints this line). Use `--container NAME` if the machine has more than one TAK Server container.
+
+Why not a plain `docker stop`? The TAK Server database image runs `tail -f /dev/null` as its main process, and that ignores the stop signal. Docker waits its timeout (10 seconds) and then kills the container, and PostgreSQL goes down without a clean shutdown. At the next start the PostgreSQL log says `database system was not properly shut down; automatic recovery in progress`. On a small database the recovery takes about a second and nothing is lost. On a big or busy database it takes longer. A reboot does the same, because the containers have no restart policy and Docker kills them when the machine goes down. Before a planned reboot, run the script first.
+
+If you did stop the install the plain way, nothing is broken: start it with `docker start` and PostgreSQL recovers by itself. `tak-docker-update-db.sh` stops the database cleanly on its own.
 
 ### Database image and PostgreSQL updates
 
@@ -523,7 +555,7 @@ Run everything from the extracted ZIP directory (where `tak/` is). The snapshot 
    **Script install:**
 
    ```bash
-   docker stop takserver-$VERSION takserver-db-$VERSION
+   ~/tak-server-installer/docker/tak-docker-stop.sh
    docker commit takserver-db-$VERSION takserver-db-data:$VERSION
    docker rm takserver-db-$VERSION
    docker run -d -it \
@@ -1279,6 +1311,26 @@ VPS Provider:
 - Use private networking
 - Configure snapshots/backups
 - Enable monitoring
+
+### Certificate file permissions (Ubuntu script installs)
+
+The install script sets every keystore that holds a private key in `/opt/tak/certs/files` to owner `tak` and mode 600: the CA signing keystores (`<CA name>-signing.jks` and `.p12`), `admin.p12`, `admin.jks`, `user.p12`, `user.jks`, `takserver.jks`, `takserver.p12`, `takserver-le.jks` (the Let's Encrypt keystore, when you use the Caddy script) and any client `.p12`. The CA private keys (`*.key`) are mode 600 as well. Only TAK Server reads these files. The truststores (`truststore-*`) are not changed: they hold no private key and you copy them to phones.
+
+**Copying `admin.p12` off the server.** Only `root` and `tak` can read it. `scp root@YOUR-IP:/opt/tak/certs/files/admin.p12 .` works as before. If you log in as a normal user, copy the file for yourself first, download it, and delete the copy:
+
+```
+sudo cp /opt/tak/certs/files/admin.p12 ~/ && sudo chown $USER ~/admin.p12
+```
+
+**Server installed with an older copy of the script?** Its keystores have a wider mode (664). To give them the same owner and mode, run this once on the server. TAK Server is not restarted and clients stay connected:
+
+```
+sudo sh -c 'cd /opt/tak/certs/files && for f in *.jks *.p12; do case "$f" in *truststore*) ;; *) chown tak:tak "$f" && chmod 600 "$f";; esac; done'
+```
+
+`Ubuntu_22.04_TAK_Server_Hardening.sh` from a current copy of the scripts does the same when it starts. A client certificate you make later with `makeCert.sh` is mode 664 again until you run one of these.
+
+Check: `sudo ls -l /opt/tak/certs/files/ | grep -E 'admin|user|takserver|signing'` shows `-rw------- 1 tak tak` for the `.p12` and `.jks` files.
 
 ### Keeping PostgreSQL up to date (Ubuntu script installs)
 
