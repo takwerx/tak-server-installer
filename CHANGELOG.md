@@ -4,6 +4,9 @@ What changed for people running these scripts. Newest first.
 
 ## Unreleased
 
+### Added
+- Docker installs: `docker/tak-docker-stop.sh` stops TAK Server, shuts PostgreSQL down cleanly, then stops the database container. A plain `docker stop` kills PostgreSQL, so the next start runs crash recovery and logs "database system was not properly shut down". Use the script before you stop or reboot the machine.
+
 ### Fixed
 - `tak-docker-enable-enrollment.sh --verify-user`: if TAK Server answers HTTP 401 (wrong user name or password), enrollment now stays on and the script says to check the name and password. Before, it undid the change, although enrollment was fine.
 
