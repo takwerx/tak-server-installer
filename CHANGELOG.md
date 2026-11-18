@@ -6,6 +6,7 @@ What changed for people running these scripts. Newest first.
 
 ### Fixed
 - Docker install of TAK Server 5.8: PostgreSQL now recycles its write-ahead log (WAL). TAK's database config copies each WAL file into a folder that does not exist, so every copy failed and PostgreSQL kept every file instead of staying near 1 GB, and the disk of a busy server filled up over time. New installs are fixed by the installer. For an install made before, run `./docker/tak-docker-fix-wal.sh` (no restart, about 1 minute; `--check` only looks). Nothing was ever archived, so nothing is lost.
+- `docker/tak-docker-fix-wal.sh` on an install that is already fixed now says `WAL archiving is already set to /bin/true. Nothing to fix.` Before, it said `/bin/true` was not TAK's default, which read as if `/bin/true` were the problem. Nothing else changed.
 
 ## v1.0.3 (Tue Nov 17, 2026)
 
