@@ -141,6 +141,7 @@ main() {
     fi
     case "$CMD" in
         *"/var/lib/postgresql/archivedir"*) ;;
+        "$WAL_NOOP_COMMAND") log "WAL archiving is already set to $WAL_NOOP_COMMAND. Nothing to fix."; return 0 ;;
         *) log "archive_command is not TAK's default ($CMD). Nothing changed."; return 0 ;;
     esac
     if $DOCKER exec "$DB" test -d /var/lib/postgresql/archivedir; then

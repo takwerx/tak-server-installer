@@ -2,6 +2,11 @@
 
 What changed for people running these scripts. Newest first.
 
+## Unreleased
+
+### Fixed
+- `docker/tak-docker-fix-wal.sh` on an install that is already fixed now says `WAL archiving is already set to /bin/true. Nothing to fix.` Before, it said `/bin/true` was not TAK's default, which read as if `/bin/true` were the problem. Nothing else changed.
+
 ## v1.0.4 (Thu Nov 19, 2026)
 
 Docker installs of TAK Server 5.8 no longer fill the disk with database log files, the installer takes the TAK ZIP's path, and it warns about small machines.
