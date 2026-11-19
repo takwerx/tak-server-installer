@@ -334,6 +334,16 @@ sed -i 's#^FROM postgres:15.1#FROM postgres:15-bookworm#' docker/Dockerfile.taks
 - Same rough VPS sizing as native installs (8GB+ RAM, 4+ cores, 50GB+ disk)
 - Place `takserver-docker-*.zip` in `~/tak-docker/` (or set `INSTALL_DIR` in the script)
 
+### Raspberry Pi 5 / ARM64 (contributed notes, not tested by us)
+
+> These notes were contributed by Matthew Clark (@tranzmatt), who tested them on his own Raspberry Pi 5. We have not tested them on a Pi. We did test the Docker install on ARM64 Ubuntu 22.04. If something here does not match what you see, please open an issue.
+
+The Docker install should run on a Raspberry Pi 5 (64-bit Raspberry Pi OS or Debian 13, arm64). Use the 16 GB model if you can. The 8 GB model works but is tight, and the script warns below 8 GB. Boot from an NVMe SSD, not an SD card, because PostgreSQL writes all the time.
+
+- Use the Docker bundle, for example `takserver-docker-hardened-5.8-RELEASE-92.zip`. Do not use the `.deb` or `.rpm`, and do not use `takserver-fedhub-docker-*.zip` (that is Federation Hub).
+- The Pi 5 kernel uses 16K memory pages. Eclipse Temurin 17 on UBI 10 (the TAK Server image base) ran fine on it, so no kernel change was needed.
+- Install Docker from Docker's own repo (`docker-ce`, `docker-buildx-plugin`) or from Debian (`docker.io`, `docker-buildx`). TAK Server 5.8 needs buildx. Its database Dockerfile turns BuildKit's `TARGETARCH=arm64` into `aarch64` to download PostgreSQL 18 and PostGIS 3.6, and both are published for `aarch64`.
+
 ### Automated install (recommended)
 
 From this repository:
@@ -345,6 +355,8 @@ cp /path/to/takserver-docker-5.x-RELEASE-x.zip ~/tak-docker/
 chmod +x ~/tak-server-installer/docker/tak-docker-install.sh
 ~/tak-server-installer/docker/tak-docker-install.sh
 ```
+
+The ZIP can stay where it is: give the script its path instead of copying it (`~/tak-server-installer/docker/tak-docker-install.sh ~/Downloads/takserver-docker-hardened-5.8-RELEASE-75.zip`). The script extracts it into `~/tak-docker/`.
 
 The script:
 
@@ -524,6 +536,22 @@ It changes nothing, and says so, when:
 - the bundle folder (with `docker/` and `tak/`) is gone: unzip the TAK Server ZIP again in the same place.
 
 New installs need nothing: the installer now builds the database image with `--pull --no-cache`, so a re-install never reuses an old base image or old layers.
+
+### PostgreSQL write-ahead log (disk use) on a Docker install of TAK Server 5.8
+
+TAK's own database config (`tak/db-utils/postgresql.conf`) has `archive_mode = on` and an `archive_command` that copies each finished write-ahead log (WAL) file into `/var/lib/postgresql/archivedir`. That folder does not exist in the container, so every copy fails, and PostgreSQL keeps every WAL file it could not copy. They are never recycled, so the disk of a busy server fills up over time. A healthy PostgreSQL keeps its WAL folder near `max_wal_size` (1 GB here). On a test box, with the same writes each round, the folder stayed at 592 MB with the fix and grew 592, 1120, 1680, 2224 MB and more without it. `SELECT failed_count FROM pg_stat_archiver;` keeps rising. Installs made with the Ubuntu `.deb` are not affected.
+
+The installer (v1.0.3 and later) sets `archive_command = '/bin/true'` in that file before the database first starts. PostgreSQL then counts each WAL file as archived and recycles it. Nothing was ever archived, so nothing is lost, and no restart is needed to turn it on.
+
+For an install made before, get the new scripts (`git pull`), then run on the machine that runs TAK Server:
+
+```
+./docker/tak-docker-fix-wal.sh
+```
+
+It looks first. It changes something only when archiving is on, the command is TAK's default and the folder is missing. Then it sets `archive_command` on the running database and reloads the config (no restart, TAK Server keeps running), fixes the same line in the bundle's `tak/db-utils/postgresql.conf` (the database container copies that file in at each start), runs a checkpoint and prints the WAL files and size before and after (a backlog drops to about 1 GB at once; on the test box 2224 MB became 848 MB). `--check` only looks, `--container NAME` picks the TAK Server container when there is more than one.
+
+If you made the archive folder yourself, or set your own `archive_command`, the script leaves both alone.
 
 ### Database port (5432)
 

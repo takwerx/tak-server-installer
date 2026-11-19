@@ -8,6 +8,11 @@
 # Uses the official takserver-docker-*.zip from https://tak.gov — not the .deb/.rpm.
 # After images exist, you can run stacks with this script (docker run) or
 # docker/docker-compose.yml (docker compose).
+#
+# Usage:
+#   ./tak-docker-install.sh [/path/to/takserver-docker[-hardened]-<version>.zip]
+# With no argument it uses any takserver-docker-*.zip in ~/tak-docker (and asks which one when there
+# are several; TAK_DOCKER_ZIP answers that question for unattended runs). A ZIP given by path can be anywhere; it is extracted into ~/tak-docker.
 #==========================================================================
 
 set -e
@@ -15,6 +20,31 @@ set -e
 # Where this script lives, found before the first cd: the README runs it as ./docker/tak-docker-install.sh,
 # and a relative $0 no longer points at the script once it has changed into the install folder.
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+
+# BEGIN zip_arg
+# Print the full path of the ZIP the user named (first argument). Print nothing when none was named. Return 1 with a message on stderr when the file is missing or is not a takserver-docker ZIP.
+zip_arg() {
+    local z="${1:-}"
+    [ -n "$z" ] || return 0
+    if [ ! -f "$z" ]; then
+        echo "ZIP not found: $z" >&2
+        return 1
+    fi
+    case "$(basename "$z")" in
+        takserver-docker-*.zip) ;;
+        *) echo "$(basename "$z") is not a TAK Server Docker ZIP (expected takserver-docker-*.zip or takserver-docker-hardened-*.zip)." >&2
+           return 1 ;;
+    esac
+    readlink -f "$z"
+}
+# END zip_arg
+
+case "${1:-}" in
+    -h|--help) sed -n '/^# Usage:/,/^#====/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*) echo "Unknown option: $1 (try --help)" >&2; exit 1 ;;
+esac
+# Resolved here, before the script changes folder, so a relative path still points at the right file.
+NAMED_ZIP=$(zip_arg "${1:-}") || exit 1
 
 RED='\033[0;31m'
 GRN='\033[0;32m'
@@ -133,6 +163,39 @@ make_server_cert() {
     done
 }
 # END server_names
+# BEGIN wal_archive
+# ops #862. TAK's database config (tak/db-utils/postgresql.conf in the 5.8 bundles) switches WAL archiving on and copies each finished
+# WAL segment to /var/lib/postgresql/archivedir. Nothing in the bundle or the image makes that folder, so every copy fails, and
+# PostgreSQL keeps every segment it could not archive: the disk fills up over time. Nothing was ever archived, so nothing is lost by
+# changing it. archive_command '/bin/true' is how the PostgreSQL manual says to switch archiving off without a restart: PostgreSQL then
+# counts each segment as archived and recycles it. Used by tak-docker-install.sh (before the database first starts) and by
+# docker/tak-docker-fix-wal.sh (for installs made before); the CI check .github/ci/test_docker_wal.sh fails if the two copies differ.
+WAL_NOOP_COMMAND='/bin/true'
+
+# 0 when the config file $1 archives into the missing folder and no other file of the bundle folder $2 makes that folder.
+wal_conf_broken() {
+    local conf="$1" bundle="$2" other
+    [ -f "$conf" ] || return 1
+    grep -Eq '^[[:space:]]*archive_mode[[:space:]]*=[[:space:]]*(on|always)([[:space:]#]|$)' "$conf" || return 1
+    grep -Eq '^[[:space:]]*archive_command[[:space:]]*=.*/var/lib/postgresql/archivedir' "$conf" || return 1
+    # A newer TAK image that makes the folder itself (a script or Dockerfile that names it) needs no change.
+    other=$(grep -rIl 'archivedir' "$bundle/docker" "$bundle/tak/db-utils" 2>/dev/null | grep -v '/postgresql\.conf$' || true)
+    [ -z "$other" ]
+}
+
+# Sets archive_command in the config file $1 to the no-op. Returns 1, and changes nothing, when there is nothing to fix.
+wal_conf_patch() {
+    local conf="$1" bundle="$2" tmp
+    wal_conf_broken "$conf" "$bundle" || return 1
+    tmp=$(mktemp) || return 1
+    sed -E "s|^([[:space:]]*archive_command[[:space:]]*=[[:space:]]*)'[^']*archivedir[^']*'|\1'${WAL_NOOP_COMMAND}'|" "$conf" > "$tmp"
+    if grep -q "archive_command[[:space:]]*=[[:space:]]*'${WAL_NOOP_COMMAND}'" "$tmp"; then
+        cat "$tmp" > "$conf" 2>/dev/null || as_root tee "$conf" < "$tmp" > /dev/null
+    fi
+    rm -f "$tmp"
+    grep -q "^[[:space:]]*archive_command[[:space:]]*=[[:space:]]*'${WAL_NOOP_COMMAND}'" "$conf"
+}
+# END wal_archive
 
 echo ""
 echo "============================================="
@@ -271,6 +334,20 @@ if [ "$NEED_DOCKER" -eq 1 ]; then
 fi
 log "Docker: $(docker --version)"
 
+# BEGIN ram_check
+# Warn (never stop) when the machine has under 8 GB of RAM: TAK Server runs several JVMs beside PostgreSQL
+# and a small machine tends to run out of memory. MemTotal reads a bit under the sticker size, so the
+# limit is 7,500,000 kB. MEMINFO can point at another file (the CI check does).
+ram_check() {
+    local mem_kb
+    mem_kb=$(awk '/^MemTotal:/ {print $2}' "${MEMINFO:-/proc/meminfo}" 2>/dev/null)
+    if [ "${mem_kb:-0}" -gt 0 ] && [ "$mem_kb" -lt 7500000 ]; then
+        warn "Only $((mem_kb / 1024)) MB of RAM. TAK Server needs 8 GB or more and may fail to start or be stopped for lack of memory."
+    fi
+}
+# END ram_check
+ram_check
+
 # Check we can run docker without sudo
 if ! docker info &>/dev/null; then
     warn "Cannot run docker without sudo. Trying with sudo for this session..."
@@ -351,17 +428,22 @@ step "1: Locate TAK Server Docker ZIP"
 
 mkdir -p "$INSTALL_DIR"
 
-# Find all takserver docker ZIPs in the install dir
+# The ZIP named on the command line, else every takserver docker ZIP in the install dir
 ZIPS=()
-while IFS= read -r f; do
-    ZIPS+=("$f")
-done < <(ls "${INSTALL_DIR}"/takserver-docker-*.zip 2>/dev/null)
+if [ -n "$NAMED_ZIP" ]; then
+    ZIPS=("$NAMED_ZIP")
+else
+    while IFS= read -r f; do
+        ZIPS+=("$f")
+    done < <(ls "${INSTALL_DIR}"/takserver-docker-*.zip 2>/dev/null)
+fi
 
 if [ ${#ZIPS[@]} -eq 0 ]; then
     err "No takserver-docker-*.zip found in ${INSTALL_DIR}"
     echo ""
     echo "  Download any TAK Server Docker release from https://tak.gov"
     echo "  and place the ZIP in: ${INSTALL_DIR}/"
+    echo "  or pass its path:     $0 /path/to/takserver-docker-<version>.zip"
     echo ""
     echo "  Examples:"
     echo "    takserver-docker-5.6-RELEASE-57.zip"
@@ -590,6 +672,15 @@ if [ -f "$CERT_META" ]; then
     log "  L=${CITY}, ST=${STATE}, C=${COUNTRY}"
 else
     warn "cert-metadata.sh not found at expected location"
+fi
+
+#----------------------------------------------------------------------
+# 5b. Database config: no failing WAL archive command (ops #862)
+#----------------------------------------------------------------------
+# TAK's postgresql.conf archives WAL into a folder that does not exist, so PostgreSQL never recycles its WAL (see the wal_archive block).
+# The file is copied into the database at its first start, so it is fixed here, before the database image is built and started.
+if wal_conf_patch "tak/db-utils/postgresql.conf" "."; then
+    log "Database config: WAL archiving no longer copies into a missing folder (archive_command is ${WAL_NOOP_COMMAND}), so PostgreSQL can recycle its WAL"
 fi
 
 #----------------------------------------------------------------------
