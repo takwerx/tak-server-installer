@@ -5,8 +5,22 @@ What changed for people running these scripts. Newest first.
 ## Unreleased
 
 ### Fixed
-- Docker install of TAK Server 5.8: PostgreSQL now recycles its write-ahead log (WAL). TAK's database config copies each WAL file into a folder that does not exist, so every copy failed and PostgreSQL kept every file instead of staying near 1 GB, and the disk of a busy server filled up over time. New installs are fixed by the installer. For an install made before, run `./docker/tak-docker-fix-wal.sh` (no restart, about 1 minute; `--check` only looks). Nothing was ever archived, so nothing is lost.
 - `docker/tak-docker-fix-wal.sh` on an install that is already fixed now says `WAL archiving is already set to /bin/true. Nothing to fix.` Before, it said `/bin/true` was not TAK's default, which read as if `/bin/true` were the problem. Nothing else changed.
+
+## v1.0.4 (Thu Nov 19, 2026)
+
+Docker installs of TAK Server 5.8 no longer fill the disk with database log files, the installer takes the TAK ZIP's path, and it warns about small machines.
+
+### Fixed
+- Docker install of TAK Server 5.8: PostgreSQL now recycles its write-ahead log (WAL). TAK's database config copied each WAL file into a folder that does not exist, so every copy failed and PostgreSQL kept every file instead of staying near 1 GB, and the disk of a busy server filled up over time. New installs are fixed by the installer. Nothing was ever archived, so nothing is lost.
+
+### Added
+- Docker install: you can pass the path of the TAK Server Docker ZIP (`./docker/tak-docker-install.sh /path/to/takserver-docker-<version>.zip`). The ZIP can be anywhere. With no path, it works as before. A missing file, or a file that is not a `takserver-docker-*.zip`, stops the script before any step. Thanks @tranzmatt.
+- Docker install: warns when the machine has under 8 GB of RAM. It only warns and keeps going. Thanks @tranzmatt.
+- Guide: Raspberry Pi 5 / ARM64 notes, contributed by @tranzmatt from his own Pi 5. We have not tested them.
+
+### Installed with v1.0.3 or older (Docker)?
+Get the new scripts (`git pull`), then run `./docker/tak-docker-fix-wal.sh` once on the machine that runs TAK Server. `--check` only looks. It does not restart TAK Server, takes about a minute, and is safe to run again. Measured on a test server that had grown to 2.2 GB of WAL: back to about 850 MB at once.
 
 ## v1.0.3 (Tue Nov 17, 2026)
 
@@ -22,9 +36,6 @@ TAK Server's private keys are now readable only by TAK Server's own account, the
 - `tak-docker-enable-enrollment.sh --verify-user`: if TAK Server answers HTTP 401 (wrong user name or password), enrollment now stays on and the script says to check the name and password. Before, it undid the change, although enrollment was fine.
 
 ### Added
-- Docker install: you can pass the path of the TAK Server Docker ZIP (`./docker/tak-docker-install.sh /path/to/takserver-docker-<version>.zip`). The ZIP can be anywhere. With no path, it works as before. A missing file, or a file that is not a `takserver-docker-*.zip`, stops the script before any step. Thanks @tranzmatt.
-- Docker install: warns when the machine has under 8 GB of RAM. It only warns and keeps going. Thanks @tranzmatt.
-- Guide: Raspberry Pi 5 / ARM64 notes, contributed by @tranzmatt from his own Pi 5. We have not tested them.
 - Docker installs: `docker/tak-docker-stop.sh` stops TAK Server, shuts PostgreSQL down cleanly, then stops the database container. A plain `docker stop` kills PostgreSQL, so the next start runs crash recovery and logs "database system was not properly shut down". Use the script before you stop or reboot the machine.
 
 ### Installed with v1.0.2 or older?
