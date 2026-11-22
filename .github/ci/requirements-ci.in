@@ -1,0 +1,4 @@
+# Source for requirements-ci.lock (ops #1014). The CI jobs install the lock by hash.
+# shellcheck is pinned so "error" means the same thing every run.
+shellcheck-py==0.11.0.1
+pyyaml==6.0.3
