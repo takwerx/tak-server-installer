@@ -1,16 +1,22 @@
 name: PR checks
 
 # Automatic checks on every PR (ops #329, same shape as infra-TAK's PR checks). No Claude involved.
+# Also run on every push to dev and main (ops #1168, same fix as mediamtx-installer's ops #1160): two PRs that each
+# pass alone can fail together once both are merged, and PR checks never see that. Same jobs, same checks-ok.
 # A red check blocks the merge once `checks-ok` is made a required check. Run the same things locally:
 #   bash .github/ci/static_checks.sh      (needs shellcheck and PyYAML)
 on:
   pull_request:
     branches: [dev, main]
     types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [dev, main]
 
 concurrency:
-  group: pr-checks-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  # PRs by number, pushes by branch (github.ref), so a push to dev never cancels a PR run and the
+  # two never share a group. Only PR runs cancel an older run; a push run always finishes.
+  group: pr-checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -231,10 +237,21 @@ jobs:
           persist-credentials: false
       - run: python3 -I .github/ci/test_workflow_pins.py
 
+  # The push trigger and the concurrency group stay as ops #1168 set them.
+  # Run locally: python3 -I .github/ci/test_push_checks.py
+  push-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: python3 -I .github/ci/test_push_checks.py
+
   # One stable name to require in branch protection. A failed or cancelled job fails it.
   checks-ok:
     if: always()
-    needs: [static, release-hygiene, docker-ports, docker-enrollment, docker-engine, docker-enable-enrollment, docker-server-names, db-pgdg-repo, pgdg-key, caddy-key, script-modes, docker-non-root, docker-update-db, ca-key-modes, docker-ram-warning, docker-zip-path, docker-stop, docker-wal, workflow-pins]
+    needs: [static, release-hygiene, docker-ports, docker-enrollment, docker-unattended, docker-engine, docker-enable-enrollment, docker-server-names, db-pgdg-repo, pgdg-key, caddy-key, script-modes, docker-non-root, docker-update-db, ca-key-modes, docker-ram-warning, docker-zip-path, docker-stop, docker-wal, workflow-pins, push-checks]
     runs-on: ubuntu-24.04
     steps:
       - env:
