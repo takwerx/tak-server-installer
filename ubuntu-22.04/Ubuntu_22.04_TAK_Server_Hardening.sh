@@ -169,27 +169,50 @@ if [[ $CHANGE_SSH_PORT =~ ^[Yy]$ ]]; then
     echo ""
     echo "Configuring SSH to use port $NEW_SSH_PORT..."
     
-    # Backup SSH config
-    cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup
-    
-    # Update SSH port
-    if grep -q "^Port " /etc/ssh/sshd_config; then
-        sed -i "s/^Port .*/Port $NEW_SSH_PORT/" /etc/ssh/sshd_config
-    elif grep -q "^#Port " /etc/ssh/sshd_config; then
-        sed -i "s/^#Port .*/Port $NEW_SSH_PORT/" /etc/ssh/sshd_config
-    else
-        echo "Port $NEW_SSH_PORT" >> /etc/ssh/sshd_config
-    fi
-    
-    # Open new port in firewall
-    echo "Opening port $NEW_SSH_PORT in firewall..."
-    ufw allow $NEW_SSH_PORT/tcp 
-    
-    
-    # Restart SSH
-    echo "Restarting SSH service..."
-    systemctl restart sshd
-    
+    # Change the port. The script runs with set -e, which would stop it half-way here (config edited, firewall not yet open)
+    # and lock you out at the next SSH restart or reboot. So every step is checked by hand, and any failure puts it all back (ops #1321).
+    # >>> ssh-port
+    apply_ssh_port() {
+        cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup || return 1
+
+        # Update SSH port
+        if grep -q "^Port " /etc/ssh/sshd_config; then
+            sed -i "s/^Port .*/Port $NEW_SSH_PORT/" /etc/ssh/sshd_config || return 1
+        elif grep -q "^#Port " /etc/ssh/sshd_config; then
+            sed -i "s/^#Port .*/Port $NEW_SSH_PORT/" /etc/ssh/sshd_config || return 1
+        else
+            echo "Port $NEW_SSH_PORT" >> /etc/ssh/sshd_config || return 1
+        fi
+
+        # Open new port in firewall (before SSH moves, so the new port is never closed)
+        echo "Opening port $NEW_SSH_PORT in firewall..."
+        ufw allow "$NEW_SSH_PORT/tcp" || return 1
+
+        # A config that sshd rejects must never be restarted into
+        sshd -t || return 1
+
+        echo "Restarting SSH service..."
+        systemctl restart sshd || return 1
+    }
+    # Returns 0 when SSH moved. On any failure it puts the config and the firewall back and returns 1.
+    change_ssh_port() {
+        apply_ssh_port && return 0
+        echo ""
+        echo "ERROR: The SSH port change failed. Putting SSH back the way it was..."
+        if [ -f /etc/ssh/sshd_config.backup ]; then
+            cp -f /etc/ssh/sshd_config.backup /etc/ssh/sshd_config
+        fi
+        ufw delete allow "$NEW_SSH_PORT/tcp" > /dev/null 2>&1 || true
+        systemctl restart sshd || true
+        echo "✓ SSH is still on port 22. Nothing else was changed. The rest of this script goes on."
+        echo ""
+        return 1
+    }
+    # <<< ssh-port
+    SSH_APPLIED=1
+    change_ssh_port || SSH_APPLIED=0
+
+    if [ "$SSH_APPLIED" = "1" ]; then
     echo ""
     echo "=========================================="
     echo "⚠️  CRITICAL - TEST NEW SSH PORT NOW!"
@@ -230,6 +253,7 @@ if [[ $CHANGE_SSH_PORT =~ ^[Yy]$ ]]; then
         echo ""
         echo "✓ SSH configuration reverted to port 22"
         echo ""
+    fi
     fi
 else
     echo "Skipping SSH port reconfiguration"
@@ -377,6 +401,20 @@ echo "  2) Gmail SMTP relay (simplified setup)"
 echo ""
 read -p 'Select option (1-2): ' EMAIL_METHOD
 
+# Stops with a clear word on what is and is not done. The SSH step is finished before this point, so SSH and the firewall
+# are in one settled state (moved and 22 closed, or never moved). Nothing from step 2 on has run yet.
+email_setup_failed() {
+    local ssh_port
+    ssh_port=$(awk '/^Port /{print $2; exit}' /etc/ssh/sshd_config 2>/dev/null)
+    echo ""
+    echo "ERROR: Email alerts could not be set up: $1"
+    echo ""
+    echo "What is done:  the SSH step (SSH listens on port ${ssh_port:-22}; the firewall was left as the SSH step set it)."
+    echo "What is not:   the guard dogs, swap, monitoring and alerts. Nothing else was changed."
+    echo "Next:          fix the problem above, then run this script again."
+    exit 1
+}
+
 # Unified postfix configuration function
 configure_postfix_relay() {
     local SMTP_HOST="$1"
@@ -388,12 +426,17 @@ configure_postfix_relay() {
     local TLS_VERIFY="$7"        # yes | no
     local AUTH_REQUIRED="$8"     # yes | no
 
-    # Install postfix + mail utilities
-    apt install -y postfix mailutils
+    # Install postfix + mail utilities. With set -e a failed install used to end the script with no word on what was done
+    # and what was not (ops #1321).
+    if ! apt install -y postfix mailutils; then
+        email_setup_failed "postfix and mailutils could not be installed (check that apt works: sudo apt update)"
+    fi
 
     # SASL modules only needed if auth is used
     if [ "$AUTH_REQUIRED" = "yes" ]; then
-        apt install -y libsasl2-modules
+        if ! apt install -y libsasl2-modules; then
+            email_setup_failed "libsasl2-modules could not be installed (check that apt works: sudo apt update)"
+        fi
     fi
 
     # Relayhost
@@ -1163,8 +1206,19 @@ if [ -f "$LAST_RESTART_FILE" ]; then
   fi
 fi
 
-# Check if PostgreSQL service is running
-if ! systemctl is-active --quiet postgresql; then
+# Ask PostgreSQL itself, not the postgresql unit. On Ubuntu that unit is a wrapper that stays "active" when the database
+# cluster (postgresql@18-main) is stopped or has crashed, so this guard dog never saw a database that was down (ops #1321).
+# pg_isready answers 0 only when the server accepts connections.
+db_is_up() {
+  if command -v pg_isready > /dev/null 2>&1; then
+    pg_isready -q
+  else
+    systemctl is-active --quiet postgresql
+  fi
+}
+
+# Check if PostgreSQL is running
+if ! db_is_up; then
   # Only send alert once per hour
   if [ ! -f "$ALERT_SENT_FILE" ] || [ "$(find $ALERT_SENT_FILE -mmin +60)" ]; then
     touch "$ALERT_SENT_FILE"
@@ -1182,21 +1236,27 @@ This will cause:
 - Service interruption
 
 Check PostgreSQL status:
-  systemctl status postgresql
+  pg_lsclusters
 
 Restart PostgreSQL:
   systemctl restart postgresql
 
 Check PostgreSQL logs:
-  tail -50 /var/lib/pgsql/15/data/log/postgresql-*.log
+  tail -50 /var/log/postgresql/postgresql-*-main.log
 "
 
     echo -e "$BODY" | mail -s "$SUBJ" "ALERT_EMAIL_PLACEHOLDER"
     
     # Attempt to restart PostgreSQL
     systemctl restart postgresql
-    
-    if systemctl is-active --quiet postgresql; then
+
+    # Give the database up to 30 seconds to accept connections before judging the restart
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+      db_is_up && break
+      sleep 2
+    done
+
+    if db_is_up; then
       echo "$(date): PostgreSQL was down, restarted successfully" >> /var/log/takguard/restarts.log
     else
       echo "$(date): PostgreSQL was down, restart FAILED" >> /var/log/takguard/restarts.log
@@ -1799,15 +1859,17 @@ systemctl start caddy
 # Wait for renewal
 sleep 60
 
-# Check if certificate was renewed
-if [ ! -f "$CERT_DIR/$TAK_DOMAIN.crt" ]; then
+# Check that Caddy has a usable certificate: both files there, and the certificate not expired. (The file alone is not
+# proof: the old certificate is still on disk when a renewal fails, ops #1321.)
+if [ ! -f "$CERT_DIR/$TAK_DOMAIN.crt" ] || [ ! -f "$CERT_DIR/$TAK_DOMAIN.key" ] \
+    || ! openssl x509 -checkend 0 -noout -in "$CERT_DIR/$TAK_DOMAIN.crt" > /dev/null 2>&1; then
     # FAILURE - Send email + SMS (urgent!)
     FAIL_MSG="TAK Server Let's Encrypt certificate renewal FAILED!
 
 Time (UTC): $(date -u '+%Y-%m-%d %H:%M:%S')
 Domain: $TAK_DOMAIN
 
-Certificate file not found after renewal attempt.
+Certificate file missing or expired after renewal attempt.
 
 Action Required:
 1. Check Caddy logs: journalctl -u caddy -n 50
@@ -1837,26 +1899,52 @@ TAK Server will continue using old certificate.
     exit 1
 fi
 
-# Convert new certificate
-openssl pkcs12 -export \
-  -in "$CERT_DIR/$TAK_DOMAIN.crt" \
-  -inkey "$CERT_DIR/$TAK_DOMAIN.key" \
-  -out /tmp/takserver-le.p12 \
-  -name "$TAK_DOMAIN" \
-  -password pass:atakatak
+# >>> keystore-swap
+# rebuild_keystore CRT KEY NAME JKS: makes TAK Server's keystore from Caddy's certificate and swaps it in only when the
+# new one is good. The old keystore is never removed first and /tmp is not used, so a failed keytool, or a leftover file
+# from an earlier run, cannot leave TAK Server with no keystore or with a stale one (ops #1321).
+# Returns 0 with the new keystore in place, or 1 with the old one untouched. TAK_OWNER is for the tests.
+rebuild_keystore() {
+    local crt="$1" key="$2" name="$3" jks="$4" work new
+    work=$(mktemp -d) || return 1
+    new="$(dirname "$jks")/.takserver-le.jks.new.$$"
+    if openssl pkcs12 -export -in "$crt" -inkey "$key" -out "$work/le.p12" -name "$name" -password pass:atakatak \
+        && keytool -importkeystore -srcstorepass atakatak -deststorepass atakatak -destkeystore "$work/le.jks" \
+            -srckeystore "$work/le.p12" -srcstoretype pkcs12 -noprompt \
+        && keytool -list -keystore "$work/le.jks" -storepass atakatak > /dev/null 2>&1 \
+        && cp "$work/le.jks" "$new" \
+        && chown "${TAK_OWNER:-tak:tak}" "$new" && chmod 600 "$new" \
+        && mv -f "$new" "$jks"; then
+        rm -rf "$work"
+        return 0
+    fi
+    rm -rf "$work"; rm -f "$new"
+    return 1
+}
+# <<< keystore-swap
 
-keytool -importkeystore \
-  -srcstorepass atakatak \
-  -deststorepass atakatak \
-  -destkeystore /tmp/takserver-le.jks \
-  -srckeystore /tmp/takserver-le.p12 \
-  -srcstoretype pkcs12
+# Build the new keystore beside the old one and swap it in only when it is good (ops #1321).
+# The old keystore was removed first, so a failed keytool left TAK Server with no keystore at all.
+if ! rebuild_keystore "$CERT_DIR/$TAK_DOMAIN.crt" "$CERT_DIR/$TAK_DOMAIN.key" "$TAK_DOMAIN" /opt/tak/certs/files/takserver-le.jks; then
+    FAIL_MSG="TAK Server Let's Encrypt keystore rebuild FAILED!
 
-# Update TAK Server certificate
-rm /opt/tak/certs/files/takserver-le.jks
-mv /tmp/takserver-le.jks /opt/tak/certs/files/
-chown tak:tak /opt/tak/certs/files/takserver-le.jks
-chmod 600 /opt/tak/certs/files/takserver-le.jks
+Time (UTC): $(date -u '+%Y-%m-%d %H:%M:%S')
+Domain: $TAK_DOMAIN
+
+The new certificate could not be turned into a TAK Server keystore.
+The old keystore was left in place and TAK Server was started with it.
+
+Action Required:
+1. Check that Java works: keytool -help
+2. Manual renewal: sudo /opt/tak/renew-letsencrypt.sh
+"
+    for email in ALERT_EMAILS_PLACEHOLDER; do
+        echo -e "$FAIL_MSG" | mail -s "TAK Certificate Renewal FAILED" "$email"
+    done
+    echo "$(date): Keystore rebuild FAILED, old keystore kept" >> "$LOG_FILE"
+    systemctl start takserver
+    exit 1
+fi
 
 # Stop Caddy
 systemctl stop caddy
