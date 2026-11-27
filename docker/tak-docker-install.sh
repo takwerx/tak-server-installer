@@ -552,6 +552,44 @@ step "3: Extract TAK Server Docker ZIP"
 
 cd "$INSTALL_DIR"
 
+# A re-run after the old containers were removed used to unzip over the old tak/ folder: the new files landed on top of the
+# old CoreConfig.xml, certificates and database files. Set that folder aside first, so the install starts clean and nothing
+# is deleted (ops #1321).
+# BEGIN set_aside_old_tak
+set_aside_old_tak() {  # ZIP -> moves an old tak/ (and tak-db-data) out of the way as NAME.old-<date and time>; returns 1 if it cannot
+    local zip="$1" top tak_path stamp item target moved=""
+    top=$(unzip -Z1 "$zip" 2>/dev/null | head -1 | cut -d/ -f1)
+    [ -n "$top" ] || return 0
+    if [ "$top" = "tak" ]; then tak_path="tak"; else tak_path="$top/tak"; fi
+    stamp=$(date +%Y%m%d-%H%M%S)
+    for item in "$tak_path" "tak-db-data"; do
+        [ -d "$item" ] || continue
+        if [ "$item" = "tak-db-data" ] && [ "$PERSIST_DB" != true ]; then continue; fi
+        # An empty folder holds nothing: remove it quietly (a failed earlier run can leave one)
+        if rmdir "$item" 2>/dev/null; then continue; fi
+        target="${item}.old-${stamp}"
+        if [ -e "$target" ]; then
+            err "Cannot set the old ${item} folder aside: ${INSTALL_DIR}/${target} already exists."
+            echo "  Nothing was changed. Move or remove ${target}, then run this script again." >&2
+            return 1
+        fi
+        if ! mv "$item" "$target" 2>/dev/null && ! as_root mv "$item" "$target"; then
+            err "Could not move ${INSTALL_DIR}/${item} to ${INSTALL_DIR}/${target}."
+            return 1
+        fi
+        moved="${moved} ${target}"
+    done
+    if [ -n "$moved" ]; then
+        warn "An earlier install was found in ${INSTALL_DIR}. This run starts clean."
+        for target in $moved; do
+            echo "      kept as ${INSTALL_DIR}/${target} (nothing was deleted; move it back to restore it)"
+        done
+    fi
+    return 0
+}
+# END set_aside_old_tak
+set_aside_old_tak "$TAK_ZIP" || exit 1
+
 log "Extracting $(basename "$TAK_ZIP")..."
 unzip -o "$TAK_ZIP"
 

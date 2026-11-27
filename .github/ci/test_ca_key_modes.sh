@@ -230,13 +230,20 @@ if [ "$(printf '%s\n' "$fix_body" | grep -c 'lock_key_files "\$container"')" -ge
 else fail "$DENABLE: fix_cert_folder does not call lock_key_files on both ways out (an existing install keeps mode 644)"; fi
 
 #=== 5. The Let's Encrypt keystore (takserver-le.jks) is made later, by the Caddy script, the Hardening script's renewal job and
-# patches/fix-caddy-renewal.sh. It holds the server's TLS key, and keytool writes it with the umask's mode: each place that hands
-# it to tak must also set mode 600.
+# patches/fix-caddy-renewal.sh. It holds the server's TLS key, and keytool writes it with the umask's mode. Since ops #1321 all three
+# build it through rebuild_keystore (between "# >>> keystore-swap" and "# <<< keystore-swap"), which hands the NEW file to tak and sets
+# mode 600 on it BEFORE it moves it over the old one, so the live keystore is never readable by other accounts, not even for a moment.
+# Nothing outside that function may touch takserver-le.jks's owner or mode, and each script must call the function.
 for f in ubuntu-22.04/Ubuntu_22.04_Caddy_setup.sh "$HARDEN" patches/fix-caddy-renewal.sh; do
-  n_chown=$(grep -cE 'chown tak:tak .*(takserver-le\.jks|JKS_FILE)' "$f")
-  n_chmod=$(grep -cE 'chmod 600 .*(takserver-le\.jks|JKS_FILE)' "$f")
-  if [ "$n_chown" -gt 0 ] && [ "$n_chmod" -ge "$n_chown" ]; then ok "$f: every takserver-le.jks it hands to tak is also set to mode 600 ($n_chmod of $n_chown)"; \
-  else fail "$f: takserver-le.jks is given to tak $n_chown time(s) but set to mode 600 only $n_chmod time(s)"; fi
+  blk=$(sed -n '/^# >>> keystore-swap/,/^# <<< keystore-swap/p' "$f")
+  chown_at=$(grep -nE 'chown "\$\{TAK_OWNER:-tak:tak\}" "\$new"' <<<"$blk" | head -n 1 | cut -d: -f1)
+  chmod_at=$(grep -nE 'chmod 600 "\$new"' <<<"$blk" | head -n 1 | cut -d: -f1)
+  mv_at=$(grep -nE 'mv -f "\$new" "\$jks"' <<<"$blk" | head -n 1 | cut -d: -f1)
+  n_calls=$(grep -cE '^[[:space:]]*if ! rebuild_keystore ' "$f")
+  n_loose=$(grep -cE '(chown|chmod) .*(takserver-le\.jks|JKS_FILE)' "$f")
+  if [ -n "$chown_at" ] && [ -n "$chmod_at" ] && [ -n "$mv_at" ] && [ "$chown_at" -le "$mv_at" ] && [ "$chmod_at" -le "$mv_at" ] && [ "$n_calls" -ge 1 ] && [ "$n_loose" -eq 0 ]; then
+    ok "$f: the new takserver-le.jks is given to tak and set to mode 600 before it replaces the old one ($n_calls call(s))"
+  else fail "$f: takserver-le.jks owner/mode not set before the swap (chown line ${chown_at:-none}, chmod line ${chmod_at:-none}, mv line ${mv_at:-none}, calls $n_calls, loose chown/chmod $n_loose)"; fi
 done
 
 if [ "$fails" -gt 0 ]; then echo "$fails check(s) failed"; exit 1; fi

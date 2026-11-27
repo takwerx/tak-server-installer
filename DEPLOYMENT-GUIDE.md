@@ -1277,13 +1277,13 @@ Certificates:
   (Entire directory - all .p12, .jks, .pem files)
 
 Database:
-  PostgreSQL database: takserver
+  PostgreSQL database: cot (owner: martiuser; there is no database named takserver)
 
 Backup PostgreSQL:
-  sudo -u postgres pg_dump takserver > takserver-backup.sql
+  sudo -u postgres pg_dump cot > tak-db-backup.sql
 
 Restore PostgreSQL:
-  sudo -u postgres psql takserver < takserver-backup.sql
+  sudo -u postgres psql cot < tak-db-backup.sql
 
 Guard Dog Configuration:
   /opt/tak-guarddog/
@@ -1817,10 +1817,10 @@ Connection refused:
    Ubuntu 22.04: systemctl status postgresql
 
 2. Verify database exists:
-   sudo -u postgres psql -l | grep takserver
+   sudo -u postgres psql -l | grep cot
 
 3. Test connection:
-   sudo -u postgres psql takserver
+   sudo -u postgres psql cot
 
 4. Check pg_hba.conf:
    Rocky Linux 9 / RHEL 9: /var/lib/pgsql/15/data/pg_hba.conf
@@ -1842,7 +1842,7 @@ Database corruption:
 3. Run vacuum:
    sudo -u postgres vacuumdb --all --analyze
 4. Check for corruption:
-   sudo -u postgres pg_dump takserver > /dev/null
+   sudo -u postgres pg_dump cot > /dev/null
 5. Restore from backup if needed
 
 Email not arriving:
@@ -2093,16 +2093,16 @@ Check status:
   Ubuntu 22.04: systemctl status postgresql
 
 Connect to database:
-  sudo -u postgres psql takserver
+  sudo -u postgres psql cot
 
 List databases:
   sudo -u postgres psql -l
 
 Backup database:
-  sudo -u postgres pg_dump takserver > backup.sql
+  sudo -u postgres pg_dump cot > backup.sql
 
 Restore database:
-  sudo -u postgres psql takserver < backup.sql
+  sudo -u postgres psql cot < backup.sql
 
 Vacuum database:
   sudo -u postgres vacuumdb --all --analyze
