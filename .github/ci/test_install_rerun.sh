@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Checks that the Ubuntu install script is safe on a machine that already has TAK Server (ops #1320).
-# Field audit (read from the code): a second run deleted every certificate with no copy, added a second certificateSigning
-# block, ran an older .deb over a newer server, carried on after a failed dpkg, and could lock out an sshd on another port.
+# Audit (read from the code, then run on a box): a second run deleted every certificate with no copy, added a second
+# certificateSigning block, ran an older .deb over a newer server, carried on after a failed dpkg, and could lock out an sshd on another port.
 # This runs the script's own functions (the blocks between "# >>> NAME" and "# <<< NAME") against fake dpkg and a scratch
 # /opt/tak. No root, no network. Needs GNU sed (Ubuntu), python3:
 #   bash .github/ci/test_install_rerun.sh
@@ -179,7 +179,18 @@ check_core() {  # check_core LABEL FILE : two runs with CA-ONE, one with CA-TWO
   if [ "$(count 'x509useGroupCache="true"' "$f")" = 1 ]; then ok "coreconfig ($label): x509 group cache set once"; else fail "coreconfig ($label): x509useGroupCache count is $(count 'x509useGroupCache="true"' "$f")"; fi
 }
 
-# the real 5.8-RELEASE105 file: <vbm enabled="false" /> with a space, certificateSigning only in a comment
+# the file as a real server has it when the script edits it: CoreConfig.xml after TAK Server's first start (taken from a box,
+# 5.8-RELEASE105; comments gone, <vbm enabled="false"/> with no space, a second truststore fed-truststore.jks that must stay as it is)
+LIVE="$PWD/.github/ci/fixtures/CoreConfig.after-first-start-5.8-RELEASE105.xml"
+cp "$LIVE" "$work/clive.xml"
+configure_core_config "$work/clive.xml" ROOT-CA-ONE; configure_core_config "$work/clive.xml" ROOT-CA-ONE; rc=$?
+if [ "$rc" = 0 ] && [ "$(count '<certificateSigning CA="TAKServer">' "$work/clive.xml")" = 1 ] && wellformed "$work/clive.xml" \
+   && grep -q 'truststoreFile="certs/files/truststore-ROOT-CA-ONE.jks"' "$work/clive.xml" && grep -q 'truststoreFile="certs/files/fed-truststore.jks"' "$work/clive.xml" \
+   && ! grep -q 'truststore-root.jks' "$work/clive.xml"; then
+  ok "coreconfig (live file after first start): two runs, one block, own truststore named, the federation truststore untouched"
+else fail "coreconfig (live file after first start): wrong result after two runs" "$(grep -n 'certificateSigning\|truststoreFile' "$work/clive.xml" | cut -c1-160)"; fi
+# the shipped 5.8-RELEASE105 CoreConfig.example.xml: <vbm enabled="false" /> with a space, certificateSigning only in a comment
+# (a running server rewrites the file without the space, which the next case covers)
 cp "$FIXTURE" "$work/c58.xml"
 check_core "5.8 file, vbm with a space" "$work/c58.xml"
 # the file the script was written for: <vbm enabled="false"/>

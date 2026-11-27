@@ -553,8 +553,10 @@ echo "=========================================="
 cd /opt/tak
 
 # The CoreConfig.xml edits (ops #1320). Safe to run again: a second run changes nothing it already did, and adds no second
-# certificateSigning block. The 5.7 and 5.8 CoreConfig.example.xml write the line as <vbm enabled="false" /> (a space before
-# the slash) and hold the example certificateSigning block only inside a comment, so the block is added there as well.
+# certificateSigning block. TAK Server rewrites CoreConfig.xml when it first starts (the comments go, and <vbm enabled="false"/>
+# has no space), so on a real run the edits find what they look for, as before. The shipped CoreConfig.example.xml of 5.7 and
+# 5.8 has a space and holds the example certificateSigning block only in a comment, so the pattern accepts both, and a file
+# with no vbm line gets the block before </Configuration>.
 # Needs GNU sed (Ubuntu). Arguments: FILE INTERMEDIATE_CA_NAME. Returns 1 if there is not exactly one block afterwards.
 # >>> coreconfig-edit
 configure_core_config() {

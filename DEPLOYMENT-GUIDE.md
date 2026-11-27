@@ -179,6 +179,8 @@ sudo ./Ubuntu_22.04_TAK_Server_install.sh
 ```
 
 
+> **Run this script on a new machine only.** If TAK Server is already installed, the Ubuntu script stops before it changes anything and says so. It never deletes the certificates of a server that is running, and it never puts an older TAK Server package over a newer one. To start over on purpose, run `sudo TAK_REINSTALL=yes ./Ubuntu_22.04_TAK_Server_install.sh`. The script first saves a copy of the certificates and settings in `/root/tak-backup-<date>` (only root can read it). The certificates are then made new, so phones and computers that were enrolled must enroll again. To update TAK Server, use the TAK Server upgrade guide: it keeps the certificates. Leave only one `takserver*.deb` file in the script's folder.
+
 The script will prompt you for:
 
 STEP 1: Certificate Metadata
