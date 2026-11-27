@@ -5,6 +5,13 @@ What changed for people running these scripts. Newest first.
 ## Unreleased
 
 ### Fixed
+- Ubuntu Caddy script: TAK Server is no longer left stopped. The script stops TAK Server in step 3. If it then stopped on an error (no DNS record yet, no certificate), TAK Server stayed down. Now it starts TAK Server again on the way out.
+- Ubuntu Caddy script: if the keystore cannot be made, the script stops before it changes `CoreConfig.xml`. Before, it went on and pointed TAK Server's port 8446 at a keystore that did not exist.
+- Ubuntu Caddy script: your existing Caddyfile is saved as `Caddyfile.backup-<date>` before it is replaced, and every run saves `CoreConfig.xml` as `CoreConfig.xml.backup-<date>` (the first `CoreConfig.xml.backup` is kept, no longer overwritten). The script also says so when the 8446 line in `CoreConfig.xml` is not the one it expects. Before, it printed a check mark either way.
+- Certificate renewal (the Caddy script, the Hardening script and `patches/fix-caddy-renewal.sh`): the new keystore is built beside the old one and swapped in only when it works. Before, the old keystore was deleted first, so a failed renewal left TAK Server with no keystore, port 8446 down, and a "renewed" mail. A failed renewal now keeps the old keystore, says so, and the Hardening version mails you.
+- Hardening script: the PostgreSQL guard dog now asks PostgreSQL itself. On Ubuntu the `postgresql` unit stays "active" when the database is stopped, so the guard dog never saw a stopped database and never mailed or restarted it. Its mail now points at the Ubuntu log folder.
+- Hardening script: a failed SSH port change puts SSH back to port 22 and carries on. A failed `apt install postfix` stops with a message that says what is done and what is not.
+- Guide: the backup, restore and check commands named a database `takserver`. TAK Server's database is `cot`, so `pg_dump takserver` failed and left an empty backup file. Fixed in all places.
 - `docker/tak-docker-fix-wal.sh` on an install that is already fixed now says `WAL archiving is already set to /bin/true. Nothing to fix.` Before, it said `/bin/true` was not TAK's default, which read as if `/bin/true` were the problem. Nothing else changed.
 
 ## v1.0.4 (Thu Nov 19, 2026)

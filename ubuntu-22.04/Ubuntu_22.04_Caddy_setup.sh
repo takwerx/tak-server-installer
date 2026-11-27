@@ -48,6 +48,45 @@ fi
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 
+# TAK Server must never be left stopped by this script (ops #1321). Step 3 stops it; if the script ends for any reason
+# before step 9 starts it again (no DNS, no certificate, a failed keystore), this starts it again on the way out.
+TAK_STOPPED_BY_SCRIPT=0
+start_tak_if_left_stopped() {
+    local rc=$?
+    if [ "$TAK_STOPPED_BY_SCRIPT" = "1" ]; then
+        TAK_STOPPED_BY_SCRIPT=0
+        echo ""
+        echo "Starting TAK Server again (this script stopped it and did not finish)..."
+        systemctl start takserver || echo "WARNING: TAK Server did not start. Run: sudo systemctl start takserver"
+    fi
+    exit "$rc"
+}
+trap start_tak_if_left_stopped EXIT
+
+# >>> keystore-swap
+# rebuild_keystore CRT KEY NAME JKS: makes TAK Server's keystore from Caddy's certificate and swaps it in only when the
+# new one is good. The old keystore is never removed first and /tmp is not used, so a failed keytool, or a leftover file
+# from an earlier run, cannot leave TAK Server with no keystore or with a stale one (ops #1321).
+# Returns 0 with the new keystore in place, or 1 with the old one untouched. TAK_OWNER is for the tests.
+rebuild_keystore() {
+    local crt="$1" key="$2" name="$3" jks="$4" work new
+    work=$(mktemp -d) || return 1
+    new="$(dirname "$jks")/.takserver-le.jks.new.$$"
+    if openssl pkcs12 -export -in "$crt" -inkey "$key" -out "$work/le.p12" -name "$name" -password pass:atakatak \
+        && keytool -importkeystore -srcstorepass atakatak -deststorepass atakatak -destkeystore "$work/le.jks" \
+            -srckeystore "$work/le.p12" -srcstoretype pkcs12 -noprompt \
+        && keytool -list -keystore "$work/le.jks" -storepass atakatak > /dev/null 2>&1 \
+        && cp "$work/le.jks" "$new" \
+        && chown "${TAK_OWNER:-tak:tak}" "$new" && chmod 600 "$new" \
+        && mv -f "$new" "$jks"; then
+        rm -rf "$work"
+        return 0
+    fi
+    rm -rf "$work"; rm -f "$new"
+    return 1
+}
+# <<< keystore-swap
+
 echo ""
 echo "=========================================="
 echo "Step 1: Installing Caddy"
@@ -163,12 +202,21 @@ echo "Step 3: Stopping TAK Server"
 echo "=========================================="
 
 systemctl stop takserver
+TAK_STOPPED_BY_SCRIPT=1
 echo "✓ TAK Server stopped"
 
 echo ""
 echo "=========================================="
 echo "Step 4: Configuring Caddy to Obtain Certificate"
 echo "=========================================="
+
+# Keep any Caddyfile that is already there (hand edits, other sites): a new copy each run, never overwritten (ops #1321).
+# The Caddyfile the Caddy package ships is not worth keeping; any other content is.
+if [ -s /etc/caddy/Caddyfile ] && ! grep -q 'Caddyfile, a simple' /etc/caddy/Caddyfile 2>/dev/null; then
+    CADDYFILE_BACKUP="/etc/caddy/Caddyfile.backup-$(date +%Y%m%d-%H%M%S)"
+    cp -p /etc/caddy/Caddyfile "$CADDYFILE_BACKUP"
+    echo "✓ Your existing Caddyfile was saved as $CADDYFILE_BACKUP"
+fi
 
 # Create Caddyfile for reverse proxy + certificate management
 cat > /etc/caddy/Caddyfile << EOF
@@ -220,9 +268,10 @@ sleep 30
 # Check if certificate was obtained
 CERT_DIR="/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/$TAK_DOMAIN"
 
-if [ ! -d "$CERT_DIR" ]; then
+if [ ! -f "$CERT_DIR/$TAK_DOMAIN.crt" ] || [ ! -f "$CERT_DIR/$TAK_DOMAIN.key" ]; then
     echo "ERROR: Certificate not obtained!"
     echo "Check Caddy logs: journalctl -u caddy -n 50"
+    echo "Check DNS: dig $TAK_DOMAIN (the A record must point at this server)"
     exit 1
 fi
 
@@ -233,26 +282,12 @@ echo "=========================================="
 echo "Step 5: Converting Certificate for TAK Server"
 echo "=========================================="
 
-# Create PKCS12 from Caddy's certificate
-openssl pkcs12 -export \
-  -in "$CERT_DIR/$TAK_DOMAIN.crt" \
-  -inkey "$CERT_DIR/$TAK_DOMAIN.key" \
-  -out /tmp/takserver-le.p12 \
-  -name "$TAK_DOMAIN" \
-  -password pass:atakatak
-
-# Convert to Java Keystore
-keytool -importkeystore \
-  -srcstorepass atakatak \
-  -deststorepass atakatak \
-  -destkeystore /tmp/takserver-le.jks \
-  -srckeystore /tmp/takserver-le.p12 \
-  -srcstoretype pkcs12
-
-# Move to TAK Server certs directory
-mv /tmp/takserver-le.jks /opt/tak/certs/files/
-chown tak:tak /opt/tak/certs/files/takserver-le.jks
-chmod 600 /opt/tak/certs/files/takserver-le.jks
+# Build the keystore beside the old one and swap it in only when it is good (ops #1321)
+if ! rebuild_keystore "$CERT_DIR/$TAK_DOMAIN.crt" "$CERT_DIR/$TAK_DOMAIN.key" "$TAK_DOMAIN" /opt/tak/certs/files/takserver-le.jks; then
+    echo "ERROR: Could not make the TAK Server keystore from Caddy's certificate."
+    echo "TAK Server's configuration was not changed. Check that Java's keytool works: keytool -help"
+    exit 1
+fi
 
 echo "✓ Certificate converted and installed"
 
@@ -265,13 +300,28 @@ echo "=========================================="
 systemctl enable caddy
 systemctl start caddy
 
-# Backup CoreConfig
-cp /opt/tak/CoreConfig.xml /opt/tak/CoreConfig.xml.backup
+# Backup CoreConfig: a new copy each run, so a second run never replaces the first (the untouched file) with an edited one.
+# CoreConfig.xml.backup stays the oldest copy, for anyone who restores it by that name.
+COREBACKUP="/opt/tak/CoreConfig.xml.backup-$(date +%Y%m%d-%H%M%S)"
+cp -p /opt/tak/CoreConfig.xml "$COREBACKUP"
+[ -e /opt/tak/CoreConfig.xml.backup ] || cp -p /opt/tak/CoreConfig.xml /opt/tak/CoreConfig.xml.backup
 
-# Update CoreConfig to use Let's Encrypt certificate on port 8446
+# Update CoreConfig to use Let's Encrypt certificate on port 8446. The text must match the file exactly, so check
+# afterwards instead of assuming (a different TAK Server release can word the line differently, ops #1321).
 sed -i 's|<connector port="8446" clientAuth="false" _name="cert_https"/>|<connector port="8446" clientAuth="false" _name="LetsEncrypt" keystore="JKS" keystoreFile="certs/files/takserver-le.jks" keystorePass="atakatak"/>|g' /opt/tak/CoreConfig.xml
 
-echo "✓ TAK Server configured to use Let's Encrypt certificate"
+CORECONFIG_EDITED=1
+if ! grep -q 'keystoreFile="certs/files/takserver-le.jks"' /opt/tak/CoreConfig.xml; then
+    CORECONFIG_EDITED=0
+    echo "WARNING: CoreConfig.xml was NOT changed: its port 8446 line is not the one this script expects."
+    echo "         TAK Server still uses its own certificate on port 8446. The Let's Encrypt keystore is ready at"
+    echo "         /opt/tak/certs/files/takserver-le.jks. Point the 8446 connector at it by hand."
+    echo "         The file before this run is saved as $COREBACKUP"
+fi
+
+if [ "$CORECONFIG_EDITED" = "1" ]; then
+    echo "✓ TAK Server configured to use Let's Encrypt certificate"
+fi
 
 echo ""
 echo "=========================================="
@@ -329,25 +379,35 @@ fi
 # Give Caddy a moment to complete any ACME activity / file writes
 sleep 15
 
-# Rebuild TAK keystore from Caddy's cert/key
-openssl pkcs12 -export \
-  -in "$CERT_CRT" \
-  -inkey "$CERT_KEY" \
-  -out /tmp/takserver-le.p12 \
-  -name "$TAK_DOMAIN" \
-  -password pass:atakatak
+# >>> keystore-swap
+# rebuild_keystore CRT KEY NAME JKS: makes TAK Server's keystore from Caddy's certificate and swaps it in only when the
+# new one is good. The old keystore is never removed first and /tmp is not used, so a failed keytool, or a leftover file
+# from an earlier run, cannot leave TAK Server with no keystore or with a stale one (ops #1321).
+# Returns 0 with the new keystore in place, or 1 with the old one untouched. TAK_OWNER is for the tests.
+rebuild_keystore() {
+    local crt="$1" key="$2" name="$3" jks="$4" work new
+    work=$(mktemp -d) || return 1
+    new="$(dirname "$jks")/.takserver-le.jks.new.$$"
+    if openssl pkcs12 -export -in "$crt" -inkey "$key" -out "$work/le.p12" -name "$name" -password pass:atakatak \
+        && keytool -importkeystore -srcstorepass atakatak -deststorepass atakatak -destkeystore "$work/le.jks" \
+            -srckeystore "$work/le.p12" -srcstoretype pkcs12 -noprompt \
+        && keytool -list -keystore "$work/le.jks" -storepass atakatak > /dev/null 2>&1 \
+        && cp "$work/le.jks" "$new" \
+        && chown "${TAK_OWNER:-tak:tak}" "$new" && chmod 600 "$new" \
+        && mv -f "$new" "$jks"; then
+        rm -rf "$work"
+        return 0
+    fi
+    rm -rf "$work"; rm -f "$new"
+    return 1
+}
+# <<< keystore-swap
 
-keytool -importkeystore \
-  -srcstorepass atakatak \
-  -deststorepass atakatak \
-  -destkeystore /tmp/takserver-le.jks \
-  -srckeystore /tmp/takserver-le.p12 \
-  -srcstoretype pkcs12
-
-rm -f /opt/tak/certs/files/takserver-le.jks
-mv /tmp/takserver-le.jks /opt/tak/certs/files/
-chown tak:tak /opt/tak/certs/files/takserver-le.jks
-chmod 600 /opt/tak/certs/files/takserver-le.jks
+# Rebuild TAK keystore from Caddy's cert/key. The old keystore stays in place until the new one is good.
+if ! rebuild_keystore "$CERT_CRT" "$CERT_KEY" "$TAK_DOMAIN" /opt/tak/certs/files/takserver-le.jks; then
+  log "ERROR: Could not build the new keystore. The old keystore is untouched and TAK Server was not restarted."
+  exit 1
+fi
 
 # Restart TAK to load the updated keystore (only happens inside the renewal window)
 systemctl restart takserver
@@ -405,6 +465,7 @@ echo "Step 9: Starting TAK Server"
 echo "=========================================="
 
 systemctl start takserver
+TAK_STOPPED_BY_SCRIPT=0
 
 echo "Waiting for TAK Server to start (60 seconds)..."
 sleep 60
