@@ -957,37 +957,51 @@ fi
 
 log "Using Dockerfile: ${TAK_DOCKERFILE}"
 
+# BEGIN app_dockerfile
 # The 5.8 hardened Dockerfile blocks openssl updates (exclude=openssl*) and then runs a full "microdnf update" from the
 # live UBI 10 repo. Once the repo ships a curl that needs a newer openssl than its pinned Temurin base image carries,
-# that step fails with "Could not depsolve transaction" (seen Nov 1, 2026: base 17.0.19_10 has openssl-libs 3.5.5, the
-# repo wants >= 3.5.8). A newer Temurin 17 UBI 10 image of the same JDK line carries the newer openssl. The bundle's
-# Dockerfile is not edited: its own ARG BASE_DEPLOY_TAG is overridden with --build-arg, and only after its own tag failed.
-# Set TAK_BASE_DEPLOY_TAG to force a tag on the first try.
-FALLBACK_BASE_TAG="17.0.20.1_1-jdk-ubi10-minimal"
-BUILD_LOG=$(mktemp)
-BUILD_ARGS=()
-if [ -n "${TAK_BASE_DEPLOY_TAG:-}" ] && grep -Eq '^ARG[[:space:]]+BASE_DEPLOY_TAG' "$TAK_DOCKERFILE"; then
-    log "Using base image tag from TAK_BASE_DEPLOY_TAG: ${TAK_BASE_DEPLOY_TAG}"
-    BUILD_ARGS=(--build-arg "BASE_DEPLOY_TAG=${TAK_BASE_DEPLOY_TAG}")
-fi
-set -o pipefail   # so a failed build is not hidden by tee
-if ! $DOCKER build "${BUILD_ARGS[@]}" -t takserver:"${VERSION}" -f "$TAK_DOCKERFILE" . 2>&1 | tee "$BUILD_LOG"; then
-    set +o pipefail
-    if [ ${#BUILD_ARGS[@]} -eq 0 ] \
-        && grep -Eq '^ARG[[:space:]]+BASE_DEPLOY_TAG' "$TAK_DOCKERFILE" \
-        && grep -q 'Could not depsolve transaction' "$BUILD_LOG" \
-        && grep -q 'openssl' "$BUILD_LOG"; then
-        warn "The bundle's base image can no longer take the current UBI 10 updates (its openssl is older than the repo's curl needs)."
-        warn "Retrying once with a newer Temurin base image: ${FALLBACK_BASE_TAG} (same JDK 17). The bundle's own Dockerfile is unchanged."
-        $DOCKER build --build-arg "BASE_DEPLOY_TAG=${FALLBACK_BASE_TAG}" -t takserver:"${VERSION}" -f "$TAK_DOCKERFILE" . \
-            || { err "TAK Server image build failed again with ${FALLBACK_BASE_TAG}."; rm -f "$BUILD_LOG"; exit 1; }
-    else
-        rm -f "$BUILD_LOG"
-        exit 1
+# that step fails with "Could not depsolve transaction" (seen Nov 1 and Nov 27, 2026 on RELEASE-75: base 17.0.19_10 has
+# openssl-libs 3.5.5, the repo wants >= 3.5.9). A newer base tag only helps until the next openssl bump, so the retry does
+# not move the base: it writes a patched copy where that update runs with --nobest (microdnf then keeps the packages it
+# cannot update, here curl, and TAK's openssl pin stays as TAK meant it). infra-TAK ships the same fix. The bundle's own
+# Dockerfile is never edited, and the retry runs only after the bundle's own Dockerfile failed with that error.
+# Set TAK_BASE_DEPLOY_TAG to force a base tag on the first try (no retry then). Tested by .github/ci/test_docker_app_dockerfile.sh.
+# Writes a copy of Dockerfile $1 to $2 with --nobest on each "RUN microdnf update -y" line. Returns 1 if it changed none.
+patch_app_dockerfile() {
+    sed -E '/--nobest/!s/^([Rr][Uu][Nn][[:space:]]+microdnf[[:space:]]+update[[:space:]]+-y)/\1 --nobest/' "$1" > "$2" || return 1
+    ! cmp -s "$1" "$2"
+}
+# Builds the TAK Server app image (takserver:$VERSION) from Dockerfile $1 in the current folder. Returns 1 if it cannot.
+build_app_image() {
+    local df="$1" build_log build_args=() patched="$1.patched"
+    build_log=$(mktemp)
+    if [ -n "${TAK_BASE_DEPLOY_TAG:-}" ] && grep -Eq '^ARG[[:space:]]+BASE_DEPLOY_TAG' "$df"; then
+        log "Using base image tag from TAK_BASE_DEPLOY_TAG: ${TAK_BASE_DEPLOY_TAG}"
+        build_args=(--build-arg "BASE_DEPLOY_TAG=${TAK_BASE_DEPLOY_TAG}")
     fi
-fi
-set +o pipefail
-rm -f "$BUILD_LOG"
+    set -o pipefail   # so a failed build is not hidden by tee
+    if $DOCKER build "${build_args[@]}" -t takserver:"${VERSION}" -f "$df" . 2>&1 | tee "$build_log"; then
+        set +o pipefail; rm -f "$build_log"; return 0
+    fi
+    set +o pipefail
+    if [ ${#build_args[@]} -eq 0 ] \
+        && grep -q 'Could not depsolve transaction' "$build_log" \
+        && grep -q 'openssl' "$build_log" \
+        && patch_app_dockerfile "$df" "$patched"; then
+        rm -f "$build_log"
+        warn "The bundle's base image can no longer take the current UBI 10 updates (its openssl is older than the repo's curl needs)."
+        warn "Retrying once with 'microdnf update --nobest' (packages that cannot be updated stay as they are)."
+        log "Patched copy: ${patched} (original unchanged)"
+        $DOCKER build -t takserver:"${VERSION}" -f "$patched" . \
+            || { err "TAK Server image build failed again with the patched copy ${patched}."; return 1; }
+        return 0
+    fi
+    rm -f "$build_log" "$patched"
+    return 1
+}
+# END app_dockerfile
+
+build_app_image "$TAK_DOCKERFILE" || exit 1
 
 log "TAK Server image built"
 

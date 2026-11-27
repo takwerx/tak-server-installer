@@ -246,6 +246,16 @@ jobs:
           persist-credentials: false
       - run: bash .github/ci/test_docker_set_aside.sh
 
+  # The Docker install retries a failed TAK Server image build once from a patched copy (microdnf update --nobest) when Red Hat's curl needs a newer openssl than the bundle's base image has (ops #1390).
+  docker-app-dockerfile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: bash .github/ci/test_docker_app_dockerfile.sh
+
   # Workflow files stay safe (ops #1014): every action pinned to a full commit SHA, read-only default token, the
   # security scans (not required yet) keep their shape. Run locally: python3 -I .github/ci/test_workflow_pins.py
   workflow-pins:
@@ -271,7 +281,7 @@ jobs:
   # One stable name to require in branch protection. A failed or cancelled job fails it.
   checks-ok:
     if: always()
-    needs: [static, release-hygiene, docker-ports, docker-enrollment, docker-unattended, docker-engine, docker-enable-enrollment, docker-server-names, db-pgdg-repo, pgdg-key, caddy-key, script-modes, docker-non-root, docker-update-db, ca-key-modes, docker-ram-warning, docker-zip-path, docker-stop, docker-wal, tak-left-stopped, docker-set-aside, workflow-pins, push-checks]
+    needs: [static, release-hygiene, docker-ports, docker-enrollment, docker-unattended, docker-engine, docker-enable-enrollment, docker-server-names, db-pgdg-repo, pgdg-key, caddy-key, script-modes, docker-non-root, docker-update-db, ca-key-modes, docker-ram-warning, docker-zip-path, docker-stop, docker-wal, tak-left-stopped, docker-set-aside, docker-app-dockerfile, workflow-pins, push-checks]
     runs-on: ubuntu-24.04
     steps:
       - env:
