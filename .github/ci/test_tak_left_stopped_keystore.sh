@@ -235,6 +235,12 @@ if echo 'for email in a@b; do' | grep -oP '(?<=for email in ).*?(?=;)' > /dev/nu
     printf '#!/bin/bash\nTAK_DOMAIN="tak.example.com"\nfor email in ops@example.com; do :; done\n' > "$R/opt/tak/renew-letsencrypt.sh"
     sandbox "$REPO/$PATCH" "$R/patch.sh"
     PATH="$bin:$PATH" bash "$R/patch.sh" > "$R/patch.out" 2>&1
+    # run it a second time the same day: the customer's original job must still be there under its own backup name
+    sleep 1; PATH="$bin:$PATH" bash "$R/patch.sh" > "$R/patch2.out" 2>&1
+    if [ "$(ls "$R"/opt/tak/renew-letsencrypt.sh.backup.* 2>/dev/null | wc -l | tr -d ' ')" = 2 ] && grep -q 'for email in ops@example.com; do :; done' "$R"/opt/tak/renew-letsencrypt.sh.backup.* 2>/dev/null \
+        && grep -l 'for email in ops@example.com; do :; done' "$R"/opt/tak/renew-letsencrypt.sh.backup.* | head -1 | xargs grep -q 'TAK_DOMAIN="tak.example.com"'; then
+        ok "patch script: run twice, the first backup (the customer's original job) is not overwritten by the second"
+    else fail "patch script: two runs left $(ls "$R"/opt/tak/renew-letsencrypt.sh.backup.* 2>/dev/null | wc -l | tr -d ' ') backup(s), expected 2 (the original is lost)" "$(tail -n 3 "$R/patch2.out")"; fi
     if [ -x "$R/opt/tak/renew-letsencrypt.sh" ] && bash -n "$R/opt/tak/renew-letsencrypt.sh"; then
         echo OLDJKS > "$R/opt/tak/certs/files/takserver-le.jks"; touch -d '2000-01-01' "$R/opt/tak/certs/files/takserver-le.jks" 2>/dev/null || touch -t 200001010000 "$R/opt/tak/certs/files/takserver-le.jks"
         : > "$FAKE_LOG"; FAKE_KEYTOOL=fail PATH="$bin:$PATH" bash "$R/opt/tak/renew-letsencrypt.sh" > "$R/p-renew.out" 2>&1; rc=$?

@@ -42,7 +42,9 @@ fi
 echo "Alert emails: $ALERT_EMAILS"
 
 # Backup current script
-cp /opt/tak/renew-letsencrypt.sh /opt/tak/renew-letsencrypt.sh.backup.$(date +%Y%m%d)
+# One name per run (date and time): a second run the same day used to replace the first backup, the customer's original job (ops #1321)
+BACKUP="/opt/tak/renew-letsencrypt.sh.backup.$(date +%Y%m%d-%H%M%S)"
+cp /opt/tak/renew-letsencrypt.sh "$BACKUP"
 echo "✓ Old script backed up"
 
 # Write new renewal script
@@ -143,7 +145,7 @@ echo "Changes:"
 echo "  ✓ Caddy now runs permanently (no more stop/start)"
 echo "  ✓ Renewal script only rebuilds JKS when cert changes"
 echo "  ✓ Only TAK Server restarts during renewal (not Caddy)"
-echo "  ✓ Old script backed up to /opt/tak/renew-letsencrypt.sh.backup.$(date +%Y%m%d)"
+echo "  ✓ Old script backed up to $BACKUP"
 echo ""
 echo "Test: /opt/tak/renew-letsencrypt.sh"
 echo ""
