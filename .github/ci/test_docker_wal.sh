@@ -172,6 +172,15 @@ if [ "$rc" -eq 0 ] && ! has f3 'alter system' && grep -qi 'archiving is off' "$w
 new_box f4; echo "rsync -a %p backup:/wal/%f" > "$work/f4.state/cmd"
 run; rc=$?
 if [ "$rc" -eq 0 ] && ! has f4 'alter system' && [ "$(cat "$work/f4.state/cmd")" = "rsync -a %p backup:/wal/%f" ]; then ok "the operator's own archive_command is not touched"; else fail "the operator's own archive_command was changed (exit $rc)"; fi
+if grep -q "is not TAK's default" "$work/out.txt" && grep -q 'rsync -a' "$work/out.txt"; then ok "the operator's own archive_command: it says it is not TAK's default and shows it"; else fail "the message for an operator's own archive_command changed" "$(tail -n 4 "$work/out.txt")"; fi
+
+# an install that is already fixed (archive_command is /bin/true): plain words, not "not TAK's default" (ops #949)
+new_box f10; echo "/bin/true" > "$work/f10.state/cmd"
+run; rc=$?
+if [ "$rc" -eq 0 ] && ! has f10 'alter system' && grep -q 'already set to /bin/true. Nothing to fix.' "$work/out.txt" && ! grep -q "not TAK's default" "$work/out.txt"; then ok "an already-fixed install says WAL archiving is already /bin/true, nothing to fix (exit 0)"; else fail "an already-fixed install got the wrong message (exit $rc)" "$(tail -n 4 "$work/out.txt")"; fi
+new_box f11; echo "/bin/true" > "$work/f11.state/cmd"
+run --check; rc=$?
+if [ "$rc" -eq 0 ] && ! has f11 'alter system' && grep -q 'already set to /bin/true. Nothing to fix.' "$work/out.txt" && ! grep -q "not TAK's default" "$work/out.txt"; then ok "--check on an already-fixed install says the same (exit 0)"; else fail "--check on an already-fixed install got the wrong message (exit $rc)" "$(tail -n 4 "$work/out.txt")"; fi
 
 new_box f5; export FAKE_DIR_EXISTS=1
 run; rc=$?

@@ -1,16 +1,22 @@
 name: PR checks
 
 # Automatic checks on every PR (ops #329, same shape as infra-TAK's PR checks). No Claude involved.
+# Also run on every push to dev and main (ops #1168, same fix as mediamtx-installer's ops #1160): two PRs that each
+# pass alone can fail together once both are merged, and PR checks never see that. Same jobs, same checks-ok.
 # A red check blocks the merge once `checks-ok` is made a required check. Run the same things locally:
 #   bash .github/ci/static_checks.sh      (needs shellcheck and PyYAML)
 on:
   pull_request:
     branches: [dev, main]
     types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [dev, main]
 
 concurrency:
-  group: pr-checks-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  # PRs by number, pushes by branch (github.ref), so a push to dev never cancels a PR run and the
+  # two never share a group. Only PR runs cancel an older run; a push run always finishes.
+  group: pr-checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -30,7 +36,7 @@ jobs:
         with:
           python-version: '3.12'
       # shellcheck pinned so "error" means the same thing every run (the runner image's own moves).
-      - run: pip install shellcheck-py==0.11.0.1 pyyaml && shellcheck --version
+      - run: pip install --require-hashes -r .github/ci/requirements-ci.lock && shellcheck --version
       - run: bash .github/ci/static_checks.sh
 
   # Version file matches the newest tag and the newest release-notes section is that version (ops #372).
@@ -57,7 +63,7 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
-      - run: pip install pyyaml
+      - run: pip install --require-hashes -r .github/ci/requirements-ci.lock
       - run: bash .github/ci/test_docker_ports.sh
 
   # The Docker install sets up certificate enrollment on 8446: an intermediate signing CA and a certificateSigning block (ops #703).
@@ -230,10 +236,52 @@ jobs:
           persist-credentials: false
       - run: bash .github/ci/test_docker_wal.sh
 
+  # TAK Server is never left stopped by the Caddy script, and the renewal scripts never remove the keystore before the new one is ready (ops #1321).
+  tak-left-stopped:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: bash .github/ci/test_tak_left_stopped_keystore.sh
+
+  # The Docker install sets an old tak/ folder (and tak-db-data) aside before it unzips, so a re-run starts clean and nothing is deleted (ops #1321).
+  docker-set-aside:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: bash .github/ci/test_docker_set_aside.sh
+
+  # Workflow files stay safe (ops #1014): every action pinned to a full commit SHA, read-only default token, the
+  # security scans (not required yet) keep their shape. Run locally: python3 -I .github/ci/test_workflow_pins.py
+  workflow-pins:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: python3 -I .github/ci/test_workflow_pins.py
+
+  # The push trigger and the concurrency group stay as ops #1168 set them.
+  # Run locally: python3 -I .github/ci/test_push_checks.py
+  push-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: python3 -I .github/ci/test_push_checks.py
+
   # One stable name to require in branch protection. A failed or cancelled job fails it.
   checks-ok:
     if: always()
-    needs: [static, release-hygiene, docker-ports, docker-enrollment, docker-engine, docker-install-gate, docker-enable-enrollment, docker-server-names, db-pgdg-repo, pgdg-key, caddy-key, script-modes, docker-non-root, docker-update-db, ca-key-modes, docker-ram-warning, docker-zip-path, docker-stop, docker-wal]
+    needs: [static, release-hygiene, docker-ports, docker-enrollment, docker-unattended, docker-install-gate, docker-engine, docker-enable-enrollment, docker-server-names, db-pgdg-repo, pgdg-key, caddy-key, script-modes, docker-non-root, docker-update-db, ca-key-modes, docker-ram-warning, docker-zip-path, docker-stop, docker-wal, tak-left-stopped, docker-set-aside, workflow-pins, push-checks]
     runs-on: ubuntu-24.04
     steps:
       - env:
