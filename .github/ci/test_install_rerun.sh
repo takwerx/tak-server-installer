@@ -38,6 +38,8 @@ EOF
 cat > "$work/bin/dpkg-deb" <<'EOF'
 #!/usr/bin/env bash
 # dpkg-deb -f FILE Version: the first line of FILE is its version (the test makes these files), "none" is unreadable.
+# dpkg-deb -f FILE Depends: what the real TAK Server .deb says.
+[ "${3:-}" = Depends ] && { echo "openjdk-17-jdk, postgresql-18, postgresql-18-postgis-3, openssl, bc"; exit 0; }
 v=$(head -n1 "$2" 2>/dev/null); [ -n "$v" ] && [ "$v" != none ] || exit 1
 echo "$v"
 EOF
@@ -134,9 +136,31 @@ if guard "$BAD"; then fail "guard: an unreadable .deb went on"; else ok "guard: 
 rm -rf "$work/debs2"; mkdir -p "$work/debs2"; touch "$work/debs2/takserver_5.8_all.deb" "$work/debs2/TAKSERVER_5.7_all.deb" "$work/debs2/other.deb" "$work/debs2/takserver.txt"
 if [ "$(find_takserver_debs "$work/debs2" | wc -l | tr -d ' ')" = 2 ]; then ok "guard: finds both takserver .deb files (any case), not other files"; else fail "guard: find_takserver_debs" "$(find_takserver_debs "$work/debs2")"; fi
 
+# --- another PostgreSQL on port 5432 --------------------------------------------------------------------------------
+cat > "$work/bin/pg_lsclusters" <<'EOF'
+#!/usr/bin/env bash
+# fake: FAKE_PG_CLUSTERS holds the lines of pg_lsclusters --no-header
+[ "${1:-}" = "--no-header" ] || exit 2
+printf '%s\n' "${FAKE_PG_CLUSTERS:-}" | grep .
+EOF
+chmod +x "$work/bin/pg_lsclusters"
+D=$(deb 5.8-RELEASE105 takserver_5.8-RELEASE105_all.deb)
+if [ "$(takserver_postgres_version "$D")" = 18 ]; then ok "postgres: the wanted version comes from the .deb's Depends line (18)"; else fail "postgres: wanted version is '$(takserver_postgres_version "$D")', not 18"; fi
+export FAKE_PG_CLUSTERS="14  main    5432 online postgres /var/lib/postgresql/14/main /var/log/postgresql/postgresql-14-main.log"
+if other=$(other_postgres_on_5432 18) && [ "$other" = 14 ]; then ok "postgres: PostgreSQL 14 on 5432 is found when 18 is wanted"; else fail "postgres: PostgreSQL 14 on 5432 was not found"; fi
+export FAKE_PG_CLUSTERS="14  main    5433 online postgres /var/lib/postgresql/14/main /var/log/postgresql/postgresql-14-main.log"
+if other_postgres_on_5432 18 >/dev/null; then fail "postgres: PostgreSQL 14 on 5433 counted as in the way"; else ok "postgres: PostgreSQL 14 moved to 5433 is not in the way"; fi
+export FAKE_PG_CLUSTERS="18  main    5432 online postgres /var/lib/postgresql/18/main /var/log/postgresql/postgresql-18-main.log"
+if other_postgres_on_5432 18 >/dev/null; then fail "postgres: TAK Server's own PostgreSQL 18 on 5432 counted as in the way"; else ok "postgres: PostgreSQL 18 on 5432 is not in the way (TAK Server's own)"; fi
+export FAKE_PG_CLUSTERS=""
+if other_postgres_on_5432 18 >/dev/null; then fail "postgres: no cluster at all counted as in the way"; else ok "postgres: no cluster, nothing in the way"; fi
+if grep -q 'other_postgres_on_5432 "\$PG_WANT"' "$INSTALL" && grep -B2 -A12 'other_postgres_on_5432 "\$PG_WANT"' "$INSTALL" | grep -q 'exit 1'; then
+  ok "install script: stops (exit 1) before any change when another PostgreSQL holds port 5432"
+else fail "install script: no stop for another PostgreSQL on port 5432"; fi
+
 # --- the install script itself: order of steps and the dpkg result -------------------------------------------------
 line() { grep -n -m1 -E "$1" "$INSTALL" | cut -d: -f1; }
-g=$(line '^if \[ "\$DEB_COUNT" -eq 1 \] && ! check_existing_tak')
+g=$(line '^    check_existing_tak "\$DEB_LIST" \|\| exit 1')
 lim=$(line 'tee --append /etc/security/limits.conf')
 apt1=$(line '^apt-get install -y lsb-release')
 rmcerts=$(line '^rm -rf /opt/tak/certs/files')
@@ -144,8 +168,7 @@ dpk=$(line '^dpkg -i ')
 if [ -n "$g" ] && [ -n "$lim" ] && [ -n "$apt1" ] && [ -n "$rmcerts" ] && [ "$g" -lt "$lim" ] && [ "$g" -lt "$apt1" ] && [ "$g" -lt "$dpk" ] && [ "$g" -lt "$rmcerts" ]; then
   ok "install script: the existing-server check runs before limits.conf, apt, dpkg and the certificate delete"
 else fail "install script: the check is missing or not first (guard $g, limits $lim, apt $apt1, dpkg $dpk, rm certs $rmcerts)"; fi
-if grep -A1 -E '^if \[ "\$DEB_COUNT" -eq 1 \] && ! check_existing_tak' "$INSTALL" | grep -q 'exit 1'; then ok "install script: stops (exit 1) when the check refuses"; \
-else fail "install script: no exit 1 after a refused check"; fi
+if grep -qF 'check_existing_tak "$DEB_LIST" || exit 1' "$INSTALL"; then ok "install script: stops (exit 1) when the check refuses"; else fail "install script: no exit 1 after a refused check"; fi
 if grep -A5 -E 'DEB_COUNT" -gt 1' "$INSTALL" | grep -q 'exit 1'; then ok "install script: stops when the folder has two TAK Server .deb files"; else fail "install script: two .deb files do not stop it"; fi
 if grep -nE '^dpkg -i "\$DEBFILE"$' "$INSTALL" >/dev/null; then fail "install script: dpkg -i result is not looked at (a failed dpkg goes on)"; else ok "install script: dpkg -i has its result handled"; fi
 if grep -q 'INSTALLED_VERSION" != "\$DEB_VERSION"' "$INSTALL" && grep -A6 'INSTALLED_VERSION" != "\$DEB_VERSION"' "$INSTALL" | grep -q 'exit 1'; then

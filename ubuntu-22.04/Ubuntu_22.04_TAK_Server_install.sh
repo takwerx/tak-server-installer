@@ -52,6 +52,20 @@ installed_takserver_version() {
     esac
 }
 
+# The PostgreSQL version the .deb asks for (its "Depends: postgresql-18" line): prints 18. Prints nothing if it names none.
+takserver_postgres_version() {
+    dpkg-deb -f "$1" Depends 2>/dev/null | grep -oE 'postgresql-[0-9]+' | head -n1 | cut -d- -f2
+}
+
+# A PostgreSQL cluster of ANOTHER version on port 5432: prints its version and returns 0. Returns 1 if there is none.
+# TAK Server's package sets up its own PostgreSQL cluster on 5432. On a test machine that had PostgreSQL 14 on 5432 first, the
+# package stopped with "Cannot find PostgreSQL data directory" and was left half-installed (ops #1320).
+# Arguments: WANTED_VERSION. Reads pg_lsclusters (no header: Ver Cluster Port Status ...).
+other_postgres_on_5432() {
+    command -v pg_lsclusters >/dev/null 2>&1 || return 1
+    pg_lsclusters --no-header 2>/dev/null | awk -v want="$1" '$3 == 5432 && $1 != want { print $1; found = 1; exit } END { exit !found }'
+}
+
 # Copy the certificates and the settings of the TAK Server that is installed into a new folder only root can read.
 # Prints the folder. Returns 1 if anything could not be copied.
 backup_tak_state() {
@@ -130,8 +144,18 @@ if [ "$DEB_COUNT" -gt 1 ]; then
     echo "Leave only the one you want to install in this folder, then run this script again."
     exit 1
 fi
-if [ "$DEB_COUNT" -eq 1 ] && ! check_existing_tak "$DEB_LIST"; then
-    exit 1
+if [ "$DEB_COUNT" -eq 1 ]; then
+    PG_WANT=$(takserver_postgres_version "$DEB_LIST")
+    if [ -n "$PG_WANT" ] && PG_OTHER=$(other_postgres_on_5432 "$PG_WANT"); then
+        echo ""
+        echo "ERROR: PostgreSQL $PG_OTHER is already running its database on port 5432 on this machine."
+        echo "TAK Server needs its own PostgreSQL $PG_WANT on port 5432. Its package did not finish its setup next to another one"
+        echo "(seen on a test machine that had PostgreSQL 14 on port 5432 first)."
+        echo "Nothing was changed. Move the other database to another port (the port line in /etc/postgresql/$PG_OTHER/main/postgresql.conf,"
+        echo "then restart it) or remove it. Then run this script again."
+        exit 1
+    fi
+    check_existing_tak "$DEB_LIST" || exit 1
 fi
 
 # Check for unattended-upgrades running
