@@ -236,6 +236,16 @@ jobs:
           persist-credentials: false
       - run: bash .github/ci/test_tak_left_stopped_keystore.sh
 
+  # The Docker install sets an old tak/ folder (and tak-db-data) aside before it unzips, so a re-run starts clean and nothing is deleted (ops #1321).
+  docker-set-aside:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: bash .github/ci/test_docker_set_aside.sh
+
   # Workflow files stay safe (ops #1014): every action pinned to a full commit SHA, read-only default token, the
   # security scans (not required yet) keep their shape. Run locally: python3 -I .github/ci/test_workflow_pins.py
   workflow-pins:
