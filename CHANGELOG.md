@@ -14,6 +14,10 @@ What changed for people running these scripts. Newest first.
 - Guide: the backup, restore and check commands named a database `takserver`. TAK Server's database is `cot`, so `pg_dump takserver` failed and left an empty backup file. Fixed in all places.
 - `docker/tak-docker-fix-wal.sh` on an install that is already fixed now says `WAL archiving is already set to /bin/true. Nothing to fix.` Before, it said `/bin/true` was not TAK's default, which read as if `/bin/true` were the problem. Nothing else changed.
 
+### Installed before this version?
+- Certificate renewal: the renewal job already on your server is the old one. Run `patches/fix-caddy-renewal.sh` again (the command is in the README) and it is replaced by the new one.
+- The PostgreSQL guard dog and the SSH and email changes come with the Hardening script. Run it again to get them.
+
 ## v1.0.4 (Thu Nov 19, 2026)
 
 Docker installs of TAK Server 5.8 no longer fill the disk with database log files, the installer takes the TAK ZIP's path, and it warns about small machines.
