@@ -279,7 +279,7 @@ if TAK_REINSTALL=yes guard "$D105"; then
   bk=$(find "$work/backups" -maxdepth 1 -name 'tak-backup-*' | head -n1)
   dmode=$(stat -c %a "$bk/cot.dump" 2>/dev/null || stat -f %Lp "$bk/cot.dump")
   if [ -s "$bk/cot.dump" ] && [ "$dmode" = 600 ] && [ -f "$bk/UserAuthenticationFile.xml" ] && [ -f "$bk/RESTORE.txt" ] \
-     && grep -q "cp -a $bk/files $work/tak/certs/files" "$bk/RESTORE.txt" && grep -q 'pg_restore --clean --if-exists -d cot' "$bk/RESTORE.txt" \
+     && grep -q "cp -a $bk/files $work/tak/certs/files" "$bk/RESTORE.txt" && grep -q "pg_restore --clean --if-exists -d cot < $bk/cot.dump" "$bk/RESTORE.txt" \
      && grep -q 'systemctl start takserver' "$bk/RESTORE.txt"; then
     ok "backup: the database copy (mode 600), the user file and a RESTORE.txt with the real paths are in the backup"
   else fail "backup: database copy or RESTORE.txt missing" "$(ls -l "$bk")" "$(cat "$bk/RESTORE.txt" 2>&1 | head -12)"; fi

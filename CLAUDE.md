@@ -13,7 +13,7 @@ Install scripts for TAK Server: `ubuntu-22.04/` (the native `.deb` install, Cadd
 - A fix comes with a test that fails without it. Prove it red on `dev`, green on your branch.
 
 ## Rules the Ubuntu install script keeps (ops #1320)
-- Step 0 runs before anything on the machine changes. A machine that already has TAK Server is refused, with its certificates untouched. `TAK_REINSTALL=yes` saves a copy of the certificates and settings in `/root/tak-backup-<date>` first. An older `.deb` over a newer server is never allowed.
+- Step 0 runs before anything on the machine changes. A machine that already has TAK Server (installed, half installed, left in `/opt/tak`, or in Docker) or a busy port 8089, 8443 or 8446 is refused, with its certificates untouched, and no `.deb` in the folder stops it too. The refusal for a newer `.deb` names the update that keeps the certificates (`apt install ./FILE.deb`, then `systemctl daemon-reload` and `systemctl start takserver`: the package stops TAK Server and does not start it). `TAK_REINSTALL=yes` saves a copy of the certificates, settings and database (`cot.dump`) in `/root/tak-backup-<date>` with a `RESTORE.txt` first. An older `.deb` over a newer server is never allowed, and a Docker TAK Server is never touched.
 - Every edit of `CoreConfig.xml` must be safe to run twice.
 - The result of `dpkg -i` is checked by what dpkg says is installed. The script has no `set -e`.
 

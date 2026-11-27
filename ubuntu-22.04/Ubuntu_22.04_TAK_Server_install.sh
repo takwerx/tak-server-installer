@@ -124,7 +124,7 @@ To put the certificates and settings back, run as root:
 
 To put the database back (only if it was damaged), run as root:
   systemctl stop takserver
-  runuser -u postgres -- pg_restore --clean --if-exists -d cot $dest/cot.dump
+  runuser -u postgres -- pg_restore --clean --if-exists -d cot < $dest/cot.dump
   systemctl start takserver
 RESTORE_TEXT
     printf '%s\n' "$dest"
