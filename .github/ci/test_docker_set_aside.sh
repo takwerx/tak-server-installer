@@ -15,6 +15,7 @@ fails=0
 ok()   { echo "ok   $1"; }
 fail() { echo "FAIL $1"; shift; [ "$#" -gt 0 ] && printf '     %s\n' "$@"; fails=$((fails + 1)); }
 
+command -v unzip > /dev/null 2>&1 || { echo "needs unzip (the Docker install needs it too: sudo apt install unzip)"; exit 2; }
 work=$(cd "$(mktemp -d)" && pwd -P)
 trap 'rm -rf "$work"' EXIT
 
