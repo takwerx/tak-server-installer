@@ -12,6 +12,7 @@ What changed for people running these scripts. Newest first.
 - Hardening script: the PostgreSQL guard dog now asks PostgreSQL itself. On Ubuntu the `postgresql` unit stays "active" when the database is stopped, so the guard dog never saw a stopped database and never mailed or restarted it. Its mail now points at the Ubuntu log folder.
 - Hardening script: a failed SSH port change puts SSH back to port 22 and carries on. A failed `apt install postfix` stops with a message that says what is done and what is not.
 - Guide: the backup, restore and check commands named a database `takserver`. TAK Server's database is `cot`, so `pg_dump takserver` failed and left an empty backup file. Fixed in all places.
+- Docker installer: running it again after you removed the old containers used to unzip over the old `tak/` folder and stop at the certificate step (`ca.pem file already exists`), leaving a half-built server. Now it renames the old `tak/` and `tak-db-data` folders to `tak.old-<date and time>` and `tak-db-data.old-<date and time>`, says so, and installs clean. Nothing is deleted: move them back to restore the old install. If that name is already taken it stops and changes nothing.
 - `docker/tak-docker-fix-wal.sh` on an install that is already fixed now says `WAL archiving is already set to /bin/true. Nothing to fix.` Before, it said `/bin/true` was not TAK's default, which read as if `/bin/true` were the problem. Nothing else changed.
 
 ### Installed before this version?

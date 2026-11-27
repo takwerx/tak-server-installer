@@ -271,7 +271,7 @@ jobs:
   # One stable name to require in branch protection. A failed or cancelled job fails it.
   checks-ok:
     if: always()
-    needs: [static, release-hygiene, docker-ports, docker-enrollment, docker-unattended, docker-engine, docker-enable-enrollment, docker-server-names, db-pgdg-repo, pgdg-key, caddy-key, script-modes, docker-non-root, docker-update-db, ca-key-modes, docker-ram-warning, docker-zip-path, docker-stop, docker-wal, tak-left-stopped, workflow-pins, push-checks]
+    needs: [static, release-hygiene, docker-ports, docker-enrollment, docker-unattended, docker-engine, docker-enable-enrollment, docker-server-names, db-pgdg-repo, pgdg-key, caddy-key, script-modes, docker-non-root, docker-update-db, ca-key-modes, docker-ram-warning, docker-zip-path, docker-stop, docker-wal, tak-left-stopped, docker-set-aside, workflow-pins, push-checks]
     runs-on: ubuntu-24.04
     steps:
       - env:
