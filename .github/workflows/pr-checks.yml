@@ -106,6 +106,16 @@ jobs:
           persist-credentials: false
       - run: bash .github/ci/test_docker_engine.sh
 
+  # The Docker packages are installed only on a machine with no Docker, so a newer or running Docker is never touched (ops #1354).
+  docker-install-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: bash .github/ci/test_docker_install_gate.sh
+
   # The script that turns on ATAK sign-in (8446) on Docker installs made before v1.0.2, run against a fake docker (ops #729).
   docker-enable-enrollment:
     runs-on: ubuntu-24.04
@@ -278,10 +288,20 @@ jobs:
           persist-credentials: false
       - run: python3 -I .github/ci/test_push_checks.py
 
+  # The Ubuntu install script is safe on a machine that already has TAK Server: it refuses (certificates kept), backs up first with TAK_REINSTALL=yes, never puts an older .deb over a newer server, edits CoreConfig.xml once (also on the 5.7 and 5.8 files), and opens sshd's real port in the firewall (ops #1320).
+  install-rerun:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: bash .github/ci/test_install_rerun.sh
+
   # One stable name to require in branch protection. A failed or cancelled job fails it.
   checks-ok:
     if: always()
-    needs: [static, release-hygiene, docker-ports, docker-enrollment, docker-unattended, docker-engine, docker-enable-enrollment, docker-server-names, db-pgdg-repo, pgdg-key, caddy-key, script-modes, docker-non-root, docker-update-db, ca-key-modes, docker-ram-warning, docker-zip-path, docker-stop, docker-wal, tak-left-stopped, docker-set-aside, docker-app-dockerfile, workflow-pins, push-checks]
+    needs: [static, release-hygiene, docker-ports, docker-enrollment, docker-unattended, docker-install-gate, docker-engine, docker-enable-enrollment, docker-server-names, db-pgdg-repo, pgdg-key, caddy-key, script-modes, docker-non-root, docker-update-db, ca-key-modes, docker-ram-warning, docker-zip-path, docker-stop, docker-wal, tak-left-stopped, docker-set-aside, docker-app-dockerfile, workflow-pins, push-checks, install-rerun]
     runs-on: ubuntu-24.04
     steps:
       - env:
