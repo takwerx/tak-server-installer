@@ -57,6 +57,41 @@ esac
 EOF
   chmod +x "$work/bin/dpkg"
 fi
+# fakes for round 2: docker (FAKE_DOCKER_NAMES), ss (FAKE_BUSY_PORTS), runuser/psql/pg_dump (FAKE_COT_DB_BYTES), df (FAKE_AVAIL_BYTES)
+cat > "$work/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+[ "$1 $2" = "ps -a" ] || exit 1
+printf '%s\n' ${FAKE_DOCKER_NAMES:-}
+EOF
+cat > "$work/bin/ss" <<'EOF'
+#!/usr/bin/env bash
+for p in ${FAKE_BUSY_PORTS:-}; do printf 'LISTEN 0 4096 0.0.0.0:%s 0.0.0.0:*\nLISTEN 0 4096 [::]:%s [::]:*\n' "$p" "$p"; done
+printf 'LISTEN 0 128 0.0.0.0:22 0.0.0.0:*\n'
+exit 0
+EOF
+cat > "$work/bin/runuser" <<'EOF'
+#!/usr/bin/env bash
+# runuser -u USER -- CMD ARGS: run CMD from PATH
+shift 3; exec "$@"
+EOF
+cat > "$work/bin/psql" <<'EOF'
+#!/usr/bin/env bash
+# psql -Atc SQL: the database exists when FAKE_COT_DB_BYTES is set
+[ -n "${FAKE_COT_DB_BYTES:-}" ] || exit 0
+case "$2" in
+  *pg_database_size*) echo "$FAKE_COT_DB_BYTES" ;;
+  *pg_database*) echo 1 ;;
+esac
+EOF
+cat > "$work/bin/pg_dump" <<'EOF'
+#!/usr/bin/env bash
+echo "FAKE DUMP of cot"
+EOF
+cat > "$work/bin/df" <<'EOF'
+#!/usr/bin/env bash
+printf 'Avail\n%s\n' "${FAKE_AVAIL_BYTES:-99999999999}"
+EOF
+chmod +x "$work/bin/docker" "$work/bin/ss" "$work/bin/runuser" "$work/bin/psql" "$work/bin/pg_dump" "$work/bin/df"
 export PATH="$work/bin:$PATH"
 
 # --- the guard, in a scratch /opt/tak -----------------------------------------------------------------------------
@@ -176,6 +211,96 @@ if grep -q 'INSTALLED_VERSION" != "\$DEB_VERSION"' "$INSTALL" && grep -A6 'INSTA
 else fail "install script: no stop when the package is not installed at the .deb's version"; fi
 if grep -qF "grep -q '^\* hard nofile 32768' /etc/security/limits.conf" "$INSTALL"; then ok "install script: limits.conf is written once"; else fail "install script: limits.conf lines are appended on every run"; fi
 
+# --- round 2 (lead's list): update path, half-installed machines, Docker, busy ports, the backup, the missing .deb ----------
+# fakes: docker (FAKE_DOCKER_NAMES), ss (FAKE_BUSY_PORTS), runuser/psql/pg_dump (FAKE_COT_DB_BYTES), df (FAKE_AVAIL_BYTES)
+unset FAKE_DOCKER_NAMES FAKE_BUSY_PORTS FAKE_COT_DB_BYTES FAKE_AVAIL_BYTES FAKE_INSTALLED TAK_REINSTALL
+D105=$(deb 5.8-RELEASE105 takserver_5.8-RELEASE105_all.deb)
+D84=$(deb 5.8-RELEASE84 takserver_5.8-RELEASE84_all.deb)
+
+# update: a newer .deb over an installed server. The text must name the command that works (box test, 84 to 105: apt install, then start)
+new_tak; export FAKE_INSTALLED="install ok installed|5.8-RELEASE84"
+if guard "$D105"; then fail "update: a newer .deb over an installed server went on"; \
+elif grep -q 'sudo apt install ./takserver_5.8-RELEASE105_all.deb' "$work/out" && grep -q 'sudo systemctl start takserver' "$work/out" \
+     && grep -q 'systemctl daemon-reload' "$work/out" && certs_kept && [ -z "$(ls -A "$work/backups")" ]; then
+  ok "update: the refusal names apt install, daemon-reload and the start of takserver, and changes nothing"
+else fail "update: the refusal does not name the update commands" "$(cat "$work/out")"; fi
+# the same version: nothing to update, so no update command in the text
+new_tak; export FAKE_INSTALLED="install ok installed|5.8-RELEASE105"
+guard "$D105"; if grep -q 'apt install' "$work/out"; then fail "update: the same version got an update command"; else ok "update: the same version gets no update command, only TAK_REINSTALL"; fi
+
+# half installed (dpkg state half-configured), /opt/tak there
+new_tak; export FAKE_INSTALLED="install ok half-configured|5.8-RELEASE105"
+if guard "$D105"; then fail "half installed: went on without TAK_REINSTALL"; \
+elif grep -q 'half installed' "$work/out" && grep -q 'half-configured' "$work/out" && grep -q 'dpkg --configure -a' "$work/out" \
+     && grep -q 'TAK_REINSTALL=yes' "$work/out" && certs_kept && [ -z "$(ls -A "$work/backups")" ]; then
+  ok "half installed: refused, says half installed, names dpkg --configure -a and TAK_REINSTALL=yes, changes nothing"
+else fail "half installed: wrong message" "$(cat "$work/out")"; fi
+if TAK_REINSTALL=yes guard "$D105"; then ok "half installed: TAK_REINSTALL=yes backs up and goes on"; else fail "half installed: TAK_REINSTALL=yes refused" "$(cat "$work/out")"; fi
+
+# package removed, /opt/tak left (dpkg state config-files)
+new_tak; export FAKE_INSTALLED="deinstall ok config-files|5.8-RELEASE105"
+if guard "$D105"; then fail "package removed, /opt/tak left: went on"; \
+elif grep -q 'is still on this machine, but the takserver package is not installed' "$work/out" && grep -q 'TAK_REINSTALL=yes' "$work/out" && certs_kept; then
+  ok "package removed, /opt/tak left: refused with its own message, certificates kept"
+else fail "package removed, /opt/tak left: wrong message" "$(cat "$work/out")"; fi
+# a package dpkg knows only as purged, nothing in /opt/tak: a new machine
+rm -rf "$work/tak"; export FAKE_INSTALLED="purge ok not-installed|"
+if guard "$D105"; then ok "purged package, no /opt/tak: a new machine goes on"; else fail "purged package, no /opt/tak: refused" "$(cat "$work/out")"; fi
+unset FAKE_INSTALLED
+
+# TAK Server in Docker: refused, also with TAK_REINSTALL=yes, nothing changed
+new_tak; rm -rf "$work/tak"
+export FAKE_DOCKER_NAMES="takserver-5.8-RELEASE-105 takserver-db-5.8-RELEASE-105"
+if guard "$D105"; then fail "docker: went on with a TAK Server container on the machine"; \
+elif grep -q 'already runs in Docker' "$work/out" && grep -q 'takserver-5.8-RELEASE-105' "$work/out"; then ok "docker: refused, names the containers"; \
+else fail "docker: wrong message" "$(cat "$work/out")"; fi
+if TAK_REINSTALL=yes guard "$D105"; then fail "docker: TAK_REINSTALL=yes went on over a Docker TAK Server"; else ok "docker: refused with TAK_REINSTALL=yes too"; fi
+export FAKE_DOCKER_NAMES="nginx postgres"
+if guard "$D105"; then ok "docker: other containers do not stop the install"; else fail "docker: an unrelated container refused the install" "$(cat "$work/out")"; fi
+unset FAKE_DOCKER_NAMES
+
+# a port TAK Server needs is used by something else, on a new machine
+rm -rf "$work/tak"; export FAKE_BUSY_PORTS="8443"
+if guard "$D105"; then fail "ports: went on with 8443 in use"; \
+elif grep -q 'port 8443' "$work/out" && grep -q 'Nothing was changed' "$work/out"; then ok "ports: 8443 in use on a new machine is refused before any change"; \
+else fail "ports: wrong message" "$(cat "$work/out")"; fi
+export FAKE_BUSY_PORTS="8089 8446"; guard "$D105" >/dev/null 2>&1; if grep -q 'port 8089 8446' "$work/out"; then ok "ports: every busy port is named"; else fail "ports: busy ports not all named" "$(cat "$work/out")"; fi
+export FAKE_BUSY_PORTS="22 9000"; if guard "$D105"; then ok "ports: other ports in use do not matter"; else fail "ports: an unrelated port refused the install"; fi
+unset FAKE_BUSY_PORTS
+# an installed server uses its own ports: with TAK_REINSTALL=yes the port check must not refuse it
+new_tak; export FAKE_INSTALLED="install ok installed|5.8-RELEASE105" FAKE_BUSY_PORTS="8089 8443 8446"
+if TAK_REINSTALL=yes guard "$D105"; then ok "ports: the server's own ports do not stop TAK_REINSTALL=yes"; else fail "ports: own ports stopped TAK_REINSTALL" "$(cat "$work/out")"; fi
+unset FAKE_BUSY_PORTS FAKE_INSTALLED
+
+# the backup holds the database and a RESTORE.txt
+new_tak; export FAKE_INSTALLED="install ok installed|5.8-RELEASE105" FAKE_COT_DB_BYTES=1048576
+echo "<auth/>" > "$work/tak/UserAuthenticationFile.xml"
+if TAK_REINSTALL=yes guard "$D105"; then
+  bk=$(find "$work/backups" -maxdepth 1 -name 'tak-backup-*' | head -n1)
+  dmode=$(stat -c %a "$bk/cot.dump" 2>/dev/null || stat -f %Lp "$bk/cot.dump")
+  if [ -s "$bk/cot.dump" ] && [ "$dmode" = 600 ] && [ -f "$bk/UserAuthenticationFile.xml" ] && [ -f "$bk/RESTORE.txt" ] \
+     && grep -q "cp -a $bk/files $work/tak/certs/files" "$bk/RESTORE.txt" && grep -q 'pg_restore --clean --if-exists -d cot' "$bk/RESTORE.txt" \
+     && grep -q 'systemctl start takserver' "$bk/RESTORE.txt"; then
+    ok "backup: the database copy (mode 600), the user file and a RESTORE.txt with the real paths are in the backup"
+  else fail "backup: database copy or RESTORE.txt missing" "$(ls -l "$bk")" "$(cat "$bk/RESTORE.txt" 2>&1 | head -12)"; fi
+else fail "backup: TAK_REINSTALL=yes refused" "$(cat "$work/out")"; fi
+# not enough room for the database: refuse before anything changes
+new_tak; export FAKE_COT_DB_BYTES=5000000000 FAKE_AVAIL_BYTES=1000000000
+if TAK_REINSTALL=yes guard "$D105"; then fail "backup: went on with no room for the database copy"; \
+elif grep -q 'Could not save a copy' "$work/out" && grep -q 'only 953 MB are free' "$work/out" && certs_kept; then ok "backup: no room for the database copy: stops, says how much is free, certificates kept"; \
+else fail "backup: wrong message for a full disk" "$(cat "$work/out")"; fi
+# no database answers: say so, and go on (the script never touches the database)
+new_tak; unset FAKE_COT_DB_BYTES FAKE_AVAIL_BYTES
+if TAK_REINSTALL=yes guard "$D105" && grep -q 'No TAK Server database' "$work/out"; then ok "backup: no database answering: it says so and goes on"; else fail "backup: no-database case" "$(cat "$work/out")"; fi
+unset FAKE_INSTALLED
+
+# no .deb in the folder: the script stops before any change (it used to add the PostgreSQL repository and change limits.conf first)
+n0=$(line 'DEB_COUNT" -eq 0')
+lim=$(line 'tee --append /etc/security/limits.conf')
+if [ -n "$n0" ] && [ -n "$lim" ] && [ "$n0" -lt "$lim" ] && grep -A8 'DEB_COUNT" -eq 0' "$INSTALL" | grep -q 'exit 1'; then
+  ok "install script: no .deb in the folder stops it (exit 1) before limits.conf and apt"
+else fail "install script: a missing .deb is only noticed after the machine was changed ($n0 / $lim)"; fi
+
 # --- CoreConfig.xml edits -----------------------------------------------------------------------------------------
 # shellcheck disable=SC1091
 . "$work/coreconfig-edit.sh"
@@ -232,6 +357,15 @@ else fail "coreconfig: a block made by the old script was not reused"; fi
 # a file with nothing to edit fails loudly
 echo "<Configuration/>" > "$work/cempty.xml"
 if configure_core_config "$work/cempty.xml" X; then fail "coreconfig: a file with nowhere for the block said it worked"; else ok "coreconfig: no block possible: returns 1, so the script warns"; fi
+# a later TAK Server release may write the vbm line as an open and close tag: the block still goes in, once
+sed 's|<vbm enabled="false" />|<vbm enabled="false"></vbm>|' "$FIXTURE" > "$work/cvbm2.xml"
+configure_core_config "$work/cvbm2.xml" X-CA; configure_core_config "$work/cvbm2.xml" X-CA; rc=$?
+if [ "$rc" = 0 ] && [ "$(count '<certificateSigning CA="TAKServer">' "$work/cvbm2.xml")" = 1 ] && wellformed "$work/cvbm2.xml"; then
+  ok "coreconfig: a vbm line written as an open and close tag still gets one block, file well-formed"
+else fail "coreconfig: vbm as open and close tag" "rc $rc, blocks $(count '<certificateSigning CA="TAKServer">' "$work/cvbm2.xml")"; fi
+# a layout the edit does not know (a certificateSigning element written another way): it must say so (return 1), never claim success
+sed 's|<vbm enabled="false" />|<certificateSigning  CA="TAKServer"><TAKServerCAConfig keystore="JKS" keystoreFile="certs/files/OLD-signing.jks"/></certificateSigning>\n<vbm enabled="false" />|' "$FIXTURE" > "$work/cunknown.xml"
+if configure_core_config "$work/cunknown.xml" X-CA; then fail "coreconfig: an unknown certificateSigning layout said it worked"; else ok "coreconfig: an unknown certificateSigning layout returns 1, so the script warns"; fi
 if grep -q 'if configure_core_config CoreConfig.xml' "$INSTALL"; then ok "install script: calls configure_core_config and checks the result"; else fail "install script: does not call configure_core_config"; fi
 
 # --- UFW: SSH on its real port --------------------------------------------------------------------------------------

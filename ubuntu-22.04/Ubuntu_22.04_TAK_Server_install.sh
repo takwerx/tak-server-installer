@@ -42,14 +42,32 @@ find_takserver_debs() {
     find "$1" -maxdepth 1 -type f -iname 'takserver*.deb' 2>/dev/null | sort
 }
 
+# What dpkg says about the takserver package: "STATUS|VERSION", for example "install ok installed|5.8-RELEASE105",
+# "install ok half-configured|5.8-RELEASE105" or "deinstall ok config-files|5.8-RELEASE105". Prints nothing if dpkg has never heard of it.
+takserver_package_info() {
+    dpkg-query -W -f='${Status}|${Version}' takserver 2>/dev/null
+}
+
 # The version of the takserver package that is fully installed here. Prints nothing and returns 1 if there is none.
 installed_takserver_version() {
     local out
-    out=$(dpkg-query -W -f='${Status}|${Version}' takserver 2>/dev/null) || return 1
+    out=$(takserver_package_info) || return 1
     case "$out" in
         "install ok installed|"*) printf '%s' "${out#*|}" ;;
         *) return 1 ;;
     esac
+}
+
+# TAK Server in Docker on this machine (the Docker script names its containers takserver-VERSION and takserver-db-VERSION):
+# prints the container names, one per line. Prints nothing when Docker is not here or has none.
+docker_tak_containers() {
+    command -v docker >/dev/null 2>&1 || return 0
+    timeout 20 docker ps -a --format '{{.Names}}' 2>/dev/null | grep -i '^takserver' || true
+}
+
+# The ports TAK Server needs (8089, 8443, 8446) that something already listens on, one line, separated by spaces.
+busy_tak_ports() {
+    ss -H -tln 2>/dev/null | awk '{ n = split($4, a, ":"); print a[n] }' | grep -E -x '8089|8443|8446' | sort -un | tr '\n' ' ' | sed 's/ $//'
 }
 
 # The PostgreSQL version the .deb asks for (its "Depends: postgresql-18" line): prints 18. Prints nothing if it names none.
@@ -66,10 +84,11 @@ other_postgres_cluster() {
     pg_lsclusters --no-header 2>/dev/null | awk -v want="$1" '$1 != want { print $1, $3; found = 1; exit } END { exit !found }'
 }
 
-# Copy the certificates and the settings of the TAK Server that is installed into a new folder only root can read.
-# Prints the folder. Returns 1 if anything could not be copied.
+# Copy the certificates, the settings and the database of the TAK Server that is installed into a new folder only root can read,
+# with a RESTORE.txt that says how to put them back. Prints the folder. Returns 1 if anything could not be copied.
+# The database (cot) is copied with pg_dump when it exists. If it is there and cannot be copied, nothing is changed at all.
 backup_tak_state() {
-    local dest f
+    local dest f dbsize avail
     dest="$TAK_BACKUP_ROOT/tak-backup-$(date +%Y%m%d-%H%M%S)"
     mkdir -p -m 700 "$dest" || return 1
     for f in "$TAK_DIR/certs/files" "$TAK_DIR/CoreConfig.xml" "$TAK_DIR/UserAuthenticationFile.xml" \
@@ -77,24 +96,76 @@ backup_tak_state() {
         [ -e "$f" ] || continue
         cp -a "$f" "$dest/" || return 1
     done
+    if command -v runuser >/dev/null 2>&1 && command -v pg_dump >/dev/null 2>&1 \
+       && [ "$(runuser -u postgres -- psql -Atc "select 1 from pg_database where datname='cot'" 2>/dev/null)" = 1 ]; then
+        dbsize=$(runuser -u postgres -- psql -Atc "select pg_database_size('cot')" 2>/dev/null) || dbsize=0
+        avail=$(df --output=avail -B1 "$dest" 2>/dev/null | tail -n1 | tr -d ' ')
+        if [ -n "$avail" ] && [ -n "$dbsize" ] && [ "$avail" -le "$dbsize" ]; then
+            echo "The database is $((dbsize / 1048576)) MB and only $((avail / 1048576)) MB are free in $TAK_BACKUP_ROOT." >&2
+            return 1
+        fi
+        runuser -u postgres -- pg_dump -Fc cot > "$dest/cot.dump" || return 1
+        chmod 600 "$dest/cot.dump"
+    else
+        echo "No TAK Server database (cot) answered, so none was copied. This script does not touch the database." >&2
+    fi
+    cat > "$dest/RESTORE.txt" <<RESTORE_TEXT
+A copy of TAK Server made by the install script before TAK_REINSTALL=yes ($(date)).
+It holds: files/ (certificates and keystores), CoreConfig.xml, UserAuthenticationFile.xml, cert-metadata.sh, and cot.dump (the database, when there was one).
+
+To put the certificates and settings back, run as root:
+  systemctl stop takserver
+  rm -rf $TAK_DIR/certs/files
+  cp -a $dest/files $TAK_DIR/certs/files
+  cp -a $dest/cert-metadata.sh $TAK_DIR/certs/cert-metadata.sh
+  cp -a $dest/CoreConfig.xml $dest/UserAuthenticationFile.xml $TAK_DIR/
+  chown -R tak:tak $TAK_DIR/certs $TAK_DIR/CoreConfig.xml $TAK_DIR/UserAuthenticationFile.xml
+  systemctl start takserver
+
+To put the database back (only if it was damaged), run as root:
+  systemctl stop takserver
+  runuser -u postgres -- pg_restore --clean --if-exists -d cot $dest/cot.dump
+  systemctl start takserver
+RESTORE_TEXT
     printf '%s\n' "$dest"
 }
 
 # DEB is the package this run would install. Returns 0 when it is safe to go on, 1 when it is not (and says why).
-# - Nothing installed: go.
+# - TAK Server in Docker on this machine: never (the two cannot share the ports).
+# - Nothing installed and the ports are free: go.
 # - TAK Server installed and the .deb is older: never. That can break the database of the newer server.
-# - TAK Server installed, same or newer .deb: stop, unless TAK_REINSTALL=yes. Then back up first and go on.
+# - TAK Server installed (or half installed, or left over in /opt/tak), same or newer .deb: stop, and name the way to update or
+#   repair. TAK_REINSTALL=yes starts over on purpose: back up first, then go on.
 check_existing_tak() {
-    local deb="$1" deb_ver inst_ver backup
+    local deb="$1" deb_ver inst_ver pkg pkg_status docker ports backup
     deb_ver=$(dpkg-deb -f "$deb" Version 2>/dev/null) || deb_ver=""
     if [ -z "$deb_ver" ]; then
         echo "ERROR: $(basename "$deb") is not a readable TAK Server package (no version inside)."
         echo "Download the .deb again from tak.gov and put the new file in this folder."
         return 1
     fi
+    pkg=$(takserver_package_info) || pkg=""
+    pkg_status="${pkg%%|*}"
     inst_ver=$(installed_takserver_version) || inst_ver=""
 
-    if [ -z "$inst_ver" ] && [ ! -e "$TAK_DIR" ]; then
+    docker=$(docker_tak_containers | tr '\n' ' ' | sed 's/ $//')
+    if [ -n "$docker" ]; then
+        echo ""
+        echo "ERROR: TAK Server already runs in Docker on this machine (containers: $docker)."
+        echo "This script installs TAK Server without Docker. The two cannot share ports 8089, 8443 and 8446."
+        echo "Nothing was changed. Keep the Docker install, or run this script on another machine."
+        return 1
+    fi
+
+    if [ -z "$inst_ver" ] && [ ! -e "$TAK_DIR" ] && { [ -z "$pkg_status" ] || [ "${pkg_status% not-installed}" != "$pkg_status" ]; }; then
+        ports=$(busy_tak_ports)
+        if [ -n "$ports" ]; then
+            echo ""
+            echo "ERROR: Something on this machine already uses port $ports. TAK Server needs 8089, 8443 and 8446."
+            echo "Nothing was changed. Find the program with: sudo ss -tlnp | grep -E ':(8089|8443|8446) '"
+            echo "Stop it, or run this script on another machine."
+            return 1
+        fi
         return 0   # a new machine
     fi
 
@@ -110,25 +181,36 @@ check_existing_tak() {
         echo ""
         if [ -n "$inst_ver" ]; then
             echo "ERROR: TAK Server $inst_ver is already installed on this machine."
+        elif [ -n "$pkg_status" ] && [ "${pkg_status% not-installed}" = "$pkg_status" ] && [ "${pkg_status% config-files}" = "$pkg_status" ]; then
+            echo "ERROR: TAK Server is only half installed on this machine (dpkg says: $pkg_status)."
         else
-            echo "ERROR: $TAK_DIR already exists on this machine."
+            echo "ERROR: $TAK_DIR is still on this machine, but the takserver package is not installed."
         fi
         echo "This script is for a new machine. Running it again would delete this server's certificates and make new ones."
         echo "Phones and computers that are enrolled would no longer be trusted by the server."
         echo ""
         echo "Nothing was changed. What to do:"
-        echo "  - To update TAK Server, follow the TAK Server upgrade guide. It keeps the certificates."
+        if [ -n "$inst_ver" ] && dpkg --compare-versions "$deb_ver" gt "$inst_ver"; then
+            echo "  - To update TAK Server from $inst_ver to $deb_ver and keep the certificates, run these in the folder that holds the .deb:"
+            echo "      sudo apt install ./$(basename "$deb")"
+            echo "      sudo systemctl daemon-reload"
+            echo "      sudo systemctl start takserver"
+            echo "    The update stops TAK Server and does not start it again. It answers again about 90 seconds after the start."
+        fi
+        if [ -z "$inst_ver" ]; then
+            echo "  - To see why the package is not finished, run: sudo dpkg --configure -a"
+        fi
         echo "  - To start over on purpose, run: sudo TAK_REINSTALL=yes $0"
-        echo "    The script then saves a copy of the certificates and settings in $TAK_BACKUP_ROOT first."
+        echo "    The script then saves a copy of the certificates, settings and database in $TAK_BACKUP_ROOT first, with a RESTORE.txt."
         return 1
     fi
 
-    echo "TAK_REINSTALL=yes: saving a copy of the certificates and settings first..."
+    echo "TAK_REINSTALL=yes: saving a copy of the certificates, settings and database first..."
     backup=$(backup_tak_state) || {
         echo "ERROR: Could not save a copy of $TAK_DIR. Nothing was changed."
         return 1
     }
-    echo "✓ Copy saved in $backup (only root can read it)"
+    echo "✓ Copy saved in $backup (only root can read it). How to put it back: $backup/RESTORE.txt"
     echo "  Certificates are made new in this run. Enrolled phones and computers must enroll again."
     return 0
 }
@@ -142,6 +224,14 @@ if [ "$DEB_COUNT" -gt 1 ]; then
     echo "ERROR: There is more than one TAK Server .deb in $SCRIPT_DIR:"
     printf '%s\n' "$DEB_LIST" | sed 's/^/  /'
     echo "Leave only the one you want to install in this folder, then run this script again."
+    exit 1
+fi
+if [ "$DEB_COUNT" -eq 0 ]; then
+    echo "ERROR: TAK Server DEB file not found!"
+    echo "Looking in: $SCRIPT_DIR"
+    echo "Expected filename pattern: takserver_*.deb"
+    echo ""
+    echo "Nothing was changed. Please place the TAK Server .deb file in the same directory as this script, then run it again."
     exit 1
 fi
 if [ "$DEB_COUNT" -eq 1 ]; then
@@ -610,7 +700,9 @@ configure_core_config() {
     # x509 group cache
     sed -i 's|<auth>|<auth x509useGroupCache="true">|g' "$cfg"
 
-    n=$(grep -cF "$opened" "$cfg")
+    # exactly one certificateSigning element outside comments, however it is written (another layout than the one above would
+    # leave two, and phones would get the wrong signer)
+    n=$(perl -0777 -pe 's/<!--.*?-->//gs' "$cfg" | grep -o '<certificateSigning[ >]' | wc -l)
     [ "$n" -eq 1 ]
 }
 # <<< coreconfig-edit
