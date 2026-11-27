@@ -189,6 +189,10 @@ export FAKE_PG_CLUSTERS="18  main    5432 online postgres /var/lib/postgresql/18
 if other_postgres_cluster 18 >/dev/null; then fail "postgres: TAK Server's own PostgreSQL 18 counted as in the way"; else ok "postgres: PostgreSQL 18 (TAK Server's own) is not in the way"; fi
 export FAKE_PG_CLUSTERS=""
 if other_postgres_cluster 18 >/dev/null; then fail "postgres: no cluster at all counted as in the way"; else ok "postgres: no cluster, nothing in the way"; fi
+# the refusal for another PostgreSQL names the way out that works when the takserver package is half installed too (box test: plain apt-get purge fails then)
+if grep -q 'dpkg --purge postgresql-\${PG_OTHER% \*} postgresql-client-\${PG_OTHER% \*}' "$INSTALL" && grep -q 'sudo TAK_REINSTALL=yes \$0' "$INSTALL"; then
+  ok "postgres: the refusal names dpkg --purge for a half-installed package and TAK_REINSTALL=yes to finish"
+else fail "postgres: the refusal does not name the dpkg --purge way out"; fi
 if grep -q 'other_postgres_cluster "\$PG_WANT"' "$INSTALL" && grep -B2 -A12 'other_postgres_cluster "\$PG_WANT"' "$INSTALL" | grep -q 'exit 1'; then
   ok "install script: stops (exit 1) before any change when another PostgreSQL is installed"
 else fail "install script: no stop for another PostgreSQL"; fi
@@ -232,7 +236,7 @@ guard "$D105"; if grep -q 'apt install' "$work/out"; then fail "update: the same
 new_tak; export FAKE_INSTALLED="install ok half-configured|5.8-RELEASE105"
 if guard "$D105"; then fail "half installed: went on without TAK_REINSTALL"; \
 elif grep -q 'half installed' "$work/out" && grep -q 'half-configured' "$work/out" && grep -q 'dpkg --configure -a' "$work/out" \
-     && grep -q 'TAK_REINSTALL=yes' "$work/out" && certs_kept && [ -z "$(ls -A "$work/backups")" ]; then
+     && grep -q 'Then finish the install with: sudo TAK_REINSTALL=yes' "$work/out" && certs_kept && [ -z "$(ls -A "$work/backups")" ]; then
   ok "half installed: refused, says half installed, names dpkg --configure -a and TAK_REINSTALL=yes, changes nothing"
 else fail "half installed: wrong message" "$(cat "$work/out")"; fi
 if TAK_REINSTALL=yes guard "$D105"; then ok "half installed: TAK_REINSTALL=yes backs up and goes on"; else fail "half installed: TAK_REINSTALL=yes refused" "$(cat "$work/out")"; fi

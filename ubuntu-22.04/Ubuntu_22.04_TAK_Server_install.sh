@@ -197,10 +197,12 @@ check_existing_tak() {
             echo "      sudo systemctl start takserver"
             echo "    The update stops TAK Server and does not start it again. It answers again about 90 seconds after the start."
         fi
-        if [ -z "$inst_ver" ]; then
-            echo "  - To see why the package is not finished, run: sudo dpkg --configure -a"
+        if [ -z "$inst_ver" ] && [ "${pkg_status% config-files}" = "$pkg_status" ] && [ -n "$pkg_status" ]; then
+            echo "  - To see why the package is not finished, run: sudo dpkg --configure -a. It prints the error. Fix what the error names first."
+            echo "  - Then finish the install with: sudo TAK_REINSTALL=yes $0"
+        else
+            echo "  - To start over on purpose, run: sudo TAK_REINSTALL=yes $0"
         fi
-        echo "  - To start over on purpose, run: sudo TAK_REINSTALL=yes $0"
         echo "    The script then saves a copy of the certificates, settings and database in $TAK_BACKUP_ROOT first, with a RESTORE.txt."
         return 1
     fi
@@ -242,7 +244,10 @@ if [ "$DEB_COUNT" -eq 1 ]; then
         echo "TAK Server needs PostgreSQL $PG_WANT and sets up its own database. On a test machine that had PostgreSQL 14 first, the"
         echo "TAK Server package stopped with \"Cannot find PostgreSQL data directory\" and stayed half-installed. Moving the old"
         echo "database to another port did not help."
-        echo "Nothing was changed. Install TAK Server on a machine with no PostgreSQL, or remove the other PostgreSQL first."
+        echo "Nothing was changed. Install TAK Server on a machine with no PostgreSQL, or remove the other PostgreSQL first"
+        echo "(back up any database you need in it before you do). Remove it with: sudo apt-get purge 'postgresql-${PG_OTHER% *}*'"
+        echo "If apt refuses because the takserver package is half installed (dpkg -l takserver), use: sudo dpkg --purge postgresql-${PG_OTHER% *} postgresql-client-${PG_OTHER% *}"
+        echo "Then finish the install with: sudo TAK_REINSTALL=yes $0"
         exit 1
     fi
     check_existing_tak "$DEB_LIST" || exit 1
