@@ -136,7 +136,7 @@ if guard "$BAD"; then fail "guard: an unreadable .deb went on"; else ok "guard: 
 rm -rf "$work/debs2"; mkdir -p "$work/debs2"; touch "$work/debs2/takserver_5.8_all.deb" "$work/debs2/TAKSERVER_5.7_all.deb" "$work/debs2/other.deb" "$work/debs2/takserver.txt"
 if [ "$(find_takserver_debs "$work/debs2" | wc -l | tr -d ' ')" = 2 ]; then ok "guard: finds both takserver .deb files (any case), not other files"; else fail "guard: find_takserver_debs" "$(find_takserver_debs "$work/debs2")"; fi
 
-# --- another PostgreSQL on port 5432 --------------------------------------------------------------------------------
+# --- another PostgreSQL on this machine --------------------------------------------------------------------------------
 cat > "$work/bin/pg_lsclusters" <<'EOF'
 #!/usr/bin/env bash
 # fake: FAKE_PG_CLUSTERS holds the lines of pg_lsclusters --no-header
@@ -147,16 +147,16 @@ chmod +x "$work/bin/pg_lsclusters"
 D=$(deb 5.8-RELEASE105 takserver_5.8-RELEASE105_all.deb)
 if [ "$(takserver_postgres_version "$D")" = 18 ]; then ok "postgres: the wanted version comes from the .deb's Depends line (18)"; else fail "postgres: wanted version is '$(takserver_postgres_version "$D")', not 18"; fi
 export FAKE_PG_CLUSTERS="14  main    5432 online postgres /var/lib/postgresql/14/main /var/log/postgresql/postgresql-14-main.log"
-if other=$(other_postgres_on_5432 18) && [ "$other" = 14 ]; then ok "postgres: PostgreSQL 14 on 5432 is found when 18 is wanted"; else fail "postgres: PostgreSQL 14 on 5432 was not found"; fi
+if other=$(other_postgres_cluster 18) && [ "$other" = "14 5432" ]; then ok "postgres: PostgreSQL 14 on 5432 is found when 18 is wanted"; else fail "postgres: PostgreSQL 14 on 5432 was not found ('$other')"; fi
 export FAKE_PG_CLUSTERS="14  main    5433 online postgres /var/lib/postgresql/14/main /var/log/postgresql/postgresql-14-main.log"
-if other_postgres_on_5432 18 >/dev/null; then fail "postgres: PostgreSQL 14 on 5433 counted as in the way"; else ok "postgres: PostgreSQL 14 moved to 5433 is not in the way"; fi
+if other=$(other_postgres_cluster 18) && [ "$other" = "14 5433" ]; then ok "postgres: PostgreSQL 14 moved to 5433 is found too (the box test: moving it did not help)"; else fail "postgres: PostgreSQL 14 on 5433 was not found ('$other')"; fi
 export FAKE_PG_CLUSTERS="18  main    5432 online postgres /var/lib/postgresql/18/main /var/log/postgresql/postgresql-18-main.log"
-if other_postgres_on_5432 18 >/dev/null; then fail "postgres: TAK Server's own PostgreSQL 18 on 5432 counted as in the way"; else ok "postgres: PostgreSQL 18 on 5432 is not in the way (TAK Server's own)"; fi
+if other_postgres_cluster 18 >/dev/null; then fail "postgres: TAK Server's own PostgreSQL 18 counted as in the way"; else ok "postgres: PostgreSQL 18 (TAK Server's own) is not in the way"; fi
 export FAKE_PG_CLUSTERS=""
-if other_postgres_on_5432 18 >/dev/null; then fail "postgres: no cluster at all counted as in the way"; else ok "postgres: no cluster, nothing in the way"; fi
-if grep -q 'other_postgres_on_5432 "\$PG_WANT"' "$INSTALL" && grep -B2 -A12 'other_postgres_on_5432 "\$PG_WANT"' "$INSTALL" | grep -q 'exit 1'; then
-  ok "install script: stops (exit 1) before any change when another PostgreSQL holds port 5432"
-else fail "install script: no stop for another PostgreSQL on port 5432"; fi
+if other_postgres_cluster 18 >/dev/null; then fail "postgres: no cluster at all counted as in the way"; else ok "postgres: no cluster, nothing in the way"; fi
+if grep -q 'other_postgres_cluster "\$PG_WANT"' "$INSTALL" && grep -B2 -A12 'other_postgres_cluster "\$PG_WANT"' "$INSTALL" | grep -q 'exit 1'; then
+  ok "install script: stops (exit 1) before any change when another PostgreSQL is installed"
+else fail "install script: no stop for another PostgreSQL"; fi
 
 # --- the install script itself: order of steps and the dpkg result -------------------------------------------------
 line() { grep -n -m1 -E "$1" "$INSTALL" | cut -d: -f1; }
